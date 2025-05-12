@@ -1,0 +1,2 @@
+# CelluarPottsModel_Pytorch
+学習可能なCelluarPottsModelをPytorchで実装します。
