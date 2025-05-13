@@ -1,0 +1,21 @@
+{
+    "name": "CPM_PyTorch Dev Container",
+    "dockerComposeFile": "docker-compose.yml",
+    "workspaceFolder": "/app",  // ← コンテナー内の作業ディレクトリを指定
+    "settings": {
+        "terminal.integrated.shell.linux": "/bin/bash"
+    },
+    "service": "torch",
+    "extensions": [
+        "ms-python.python",
+        "ms-azuretools.vscode-docker",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "ms-azuretools.vscode-docker",
+        "mhutchie.git-graph",
+        "codezombiech.gitignore",
+        "coolcline.coolcline",
+        "ms-python.black-formatter"
+    ],
+    //"postCreateCommand": ". ./init.sh"
+}

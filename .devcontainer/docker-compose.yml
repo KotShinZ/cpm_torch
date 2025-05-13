@@ -1,0 +1,26 @@
+version: '3.9'  # バージョンを3.9以上に変更
+
+services:
+  torch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ../:/app
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    #mem_limit: 64g
+    # auto_remove: true  # 3.8では非サポートのため削除
+    tty: true
+    stdin_open: true
+    restart: "no"  # --rmの代替オプション
+    #ports:
+    #  - "8888:8888"
