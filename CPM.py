@@ -24,6 +24,15 @@ import random  # 乱数生成
 import torch  # PyTorch 本体
 import torch.nn.functional as F  # PyTorch のニューラルネットワーク関数群
 
+# === デバイス設定 ===
+# CUDA (GPU) が利用可能ならGPUを、そうでなければCPUを使用
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print(f"GPUを利用します: {torch.cuda.get_device_name(0)}")
+else:
+    device = torch.device("cpu")
+    print("CPUを利用します")
+
 # IPython環境（Jupyterなど）が利用可能かチェックし、画像表示用の関数をインポート
 try:
     from IPython.display import Image, HTML, clear_output, display
@@ -569,26 +578,6 @@ else:
             )
 
 
-# === デバイス設定 ===
-# CUDA (GPU) が利用可能ならGPUを、そうでなければCPUを使用
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-    print(f"GPUを利用します: {torch.cuda.get_device_name(0)}")
-else:
-    device = torch.device("cpu")
-    print("CPUを利用します")
-
-# === ハイパーパラメータ ===
-s_0 = 100.0  # 初期細胞密度（float型を使用）
-
-l_A = 1.0  # 面積エネルギー項の係数λ_A
-l_L = 1.0  # 周囲長エネルギー項の係数λ_L (注意: TF版のcalc_cpm_percentでは未使用だった)
-A_0 = 150.0  # 目標細胞面積 A_0
-L_0 = 42.0  # 目標細胞周囲長 L_0 (注意: TF版のcalc_cpm_percentでは未使用だった)
-
-T = 1.0  # 温度パラメータ T (ボルツマン分布の計算に使用)
-
-
 # === 色関連の関数 ===
 def create_rgb_image_from_hue_tensor_pil(
     hue_tensor: torch.Tensor, hue_max_value: int = 255
@@ -668,7 +657,7 @@ def map_init(height=256, width=256):
     center_y_slice = slice(width // 2 - 1, width // 2 + 1)
 
     # add_cell関数で細胞を追加（map_tensorが直接変更され、次のIDが返る）
-    map_tensor, _ = add_cell(map_tensor, center_x_slice, center_y_slice, value=s_0)
+    map_tensor, _ = add_cell(map_tensor, center_x_slice, center_y_slice, value=100)
 
     # IDカウンターをリセット（初期細胞追加後に次のIDを2にする）
     cell_newer_id_counter = 2
@@ -1149,7 +1138,7 @@ def calc_cpm_probabilities(map_tensor, ids_patch, l_A, A_0, l_L, L_0, T):
     # --- ボルツマン確率のロジット（対数確率）を計算 ---
     # Logit = -ΔH / T
     # 無限大のΔHは -無限大のロジットになる
-    logits = -delta_H / T  # (N, 4)
+    logits = torch.exp(-delta_H / T)  # (N, 4)
 
     # 遷移確率が0になるように）
     logits = torch.where(
@@ -1158,7 +1147,9 @@ def calc_cpm_probabilities(map_tensor, ids_patch, l_A, A_0, l_L, L_0, T):
 
     return logits  # 各パッチ中心に対する遷移ロジット(N, 4)を返す
 
+
 neighbors = [1, 3, 5, 7, 4]
+
 
 def cpm_checkerboard_step(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
     """CPMの1ステップをチェッカーボードパターンの一部に対して実行する。"""
@@ -1172,15 +1163,21 @@ def cpm_checkerboard_step(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
     num_patches = map_patched.shape[0]
     # print(map_patched.shape)
     ids_patch = map_patched[:, :, 0]
-    
+
     if torch.isnan(map_input).any() or torch.isinf(map_input).any():
-        print(f"警告: map_input に NaN/Inf があります! (offset: {x_offset}, {y_offset})")
-        print(f"NaNs in map_input ch0: {torch.isnan(map_input[:,:,0]).sum()}, ch1: {torch.isnan(map_input[:,:,1]).sum()}, ch2: {torch.isnan(map_input[:,:,2]).sum()}")
+        print(
+            f"警告: map_input に NaN/Inf があります! (offset: {x_offset}, {y_offset})"
+        )
+        print(
+            f"NaNs in map_input ch0: {torch.isnan(map_input[:,:,0]).sum()}, ch1: {torch.isnan(map_input[:,:,1]).sum()}, ch2: {torch.isnan(map_input[:,:,2]).sum()}"
+        )
         # 必要に応じて処理を中断したり、値を修正したりする
 
     # ids_patch = map_patched[:, :, 0] の後に追加
     if torch.isnan(ids_patch).any() or torch.isinf(ids_patch).any():
-        print(f"警告: ids_patch (インデックス操作前) に NaN/Inf があります! (offset: {x_offset}, {y_offset})")
+        print(
+            f"警告: ids_patch (インデックス操作前) に NaN/Inf があります! (offset: {x_offset}, {y_offset})"
+        )
     ids_patch = ids_patch[:, neighbors]
 
     # パッチの形状: (パッチ数, 5, C) = (N, 5, 3)
@@ -1189,31 +1186,24 @@ def cpm_checkerboard_step(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
     # 入力: マップ全体と抽出されたパッチ
     # 出力: (N, 4) - 隣接状態(0-8)をサンプリングするためのロジット
     logits = calc_cpm_probabilities(map_input, ids_patch, l_A, A_0, l_L, L_0, T)
-
-    # デバッグ用: ロジットにNaNやInfが含まれていないかチェック
-    if torch.isnan(logits).any() or torch.isinf(logits).any():
-        print(
-            f"警告: オフセット({x_offset}, {y_offset})のロジットにNaN/Infが検出されました。"
-        )
-        # 対処法: NaN/Infを非常に小さい値（-inf）に置き換えてサンプリングエラーを防ぐ
-        logits = torch.nan_to_num(
-            logits, nan=-float("inf"), posinf=0.0, neginf=-float("inf")
-        )  # infも-infに置き換え
-
+    logits = torch.clip(logits, 0, 1)
+    # print(logits)
     # 3. 各パッチ中心について、次に採用する状態（隣接ピクセルのインデックス）をサンプリング
     # torch.multinomialは確率または対数確率を入力とする。
     # 全てのロジットが-infの場合、multinomialはエラーを起こすため、これをハンドルする。
 
     rand = torch.rand_like(logits)  # 確率を生成 (N, 4)
-    selects = torch.relu(torch.sign(logits - rand))  # 0か1に(N, 4)
+    prob = logits / 4
+    
+
+    # selects = torch.relu(torch.sign(logits - rand))  # 0か1に(N, 4)
 
     # 各パッチの確率 (N, 4) - 確率の合計は1になる
-    prob = selects / (torch.sum(selects, dim=1, keepdim=True) + 1e-8)  # (N, 4)
+    #prob = selects / (torch.sum(selects, dim=1, keepdim=True) + 1e-8)  # (N, 4)
 
     # 遷移しない確率を追加
-    prob = torch.concat(
-        (prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1
-    )  # (N, 5)
+    prob = torch.concat((prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1)
+    #print(prob)
     # サンプリング (N, 1)
     sampled_indices = torch.multinomial(prob, num_samples=1)
 
@@ -1224,9 +1214,7 @@ def cpm_checkerboard_step(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
     # source_id_all : (N, 5)
     # sampled_indices : (N, 1)
 
-    new_center_ids = torch.gather(
-        ids_patch, dim=1, index=sampled_indices.long()
-    )  # (N, 1)
+    new_center_ids = torch.gather(ids_patch, dim=1, index=sampled_indices.long())
 
     # 5. パッチテンソルを更新：中心ピクセルのIDを新しいIDで、前のIDを古いIDで更新
     # map_patched_updated = map_patched.clone()  # 元のパッチテンソルをコピーして変更
@@ -1317,4 +1305,3 @@ def diffusion_step(map_tensor: torch.Tensor, dt=0.1):
     # ID (チャンネル0) と Previous ID (チャンネル2) はこのステップでは変更しない
 
     return map_out
-
