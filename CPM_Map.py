@@ -2,50 +2,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-# 細胞IDのカウンター（グローバル変数、シンプルなPython intとして管理）
-cell_newer_id_counter = 1
-
-def map_init(height=256, width=256, device="cuda"):
-    """シミュレーション用のマップ（格子）を初期化する。"""
-    global cell_newer_id_counter
-    # マップテンソルを作成: (高さ, 幅, チャンネル数)
-    # チャンネル 0: 細胞ID
-    # チャンネル 1: 細胞密度 / スカラー値（例：面積）
-    # チャンネル 2: 前ステップの細胞ID（拡散の境界条件チェック用）
-    map_tensor = torch.zeros((height, width, 3), dtype=torch.float32, device=device)
-
-    # マップ中央に初期細胞を配置
-    center_x_slice = slice(height // 2 - 1, height // 2 + 1)  # 例: 中央2x2領域
-    center_y_slice = slice(width // 2 - 1, width // 2 + 1)
-
-    # add_cell関数で細胞を追加（map_tensorが直接変更され、次のIDが返る）
-    map_tensor, _ = add_cell(map_tensor, center_x_slice, center_y_slice, value=100)
-
-    # IDカウンターをリセット（初期細胞追加後に次のIDを2にする）
-    cell_newer_id_counter = 2
-    return map_tensor
-
-
-def add_cell(map_tensor, x_slice, y_slice, value=100.0):
-    """指定されたスライスに新しいIDと値を持つ細胞を追加する。"""
-    global cell_newer_id_counter  # グローバルなIDカウンターを使用
-    current_id = cell_newer_id_counter  # 現在のカウンター値を新しいIDとする
-
-    # 指定スライスと同じ形状で、IDと値で埋められたテンソルを作成
-    id_tensor = torch.full_like(map_tensor[x_slice, y_slice, 0], float(current_id))
-    value_tensor = torch.full_like(map_tensor[x_slice, y_slice, 1], float(value))
-
-    # スライシングを使ってマップテンソルにIDと値を直接代入（インプレース操作）
-    map_tensor[x_slice, y_slice, 0] = id_tensor  # チャンネル0 (ID)
-    map_tensor[x_slice, y_slice, 1] = value_tensor  # チャンネル1 (Value)
-    map_tensor[x_slice, y_slice, 2] = id_tensor  # チャンネル2 (Previous ID) も初期化
-
-    # 次の細胞のためにIDカウンターをインクリメント
-    cell_newer_id_counter += 1
-    # 変更されたマップテンソルと、次に使用するIDを返す
-    return map_tensor, cell_newer_id_counter
-
-
 # === CPM パッチ抽出 / 再構成 (PyTorchのunfold/foldを使用) ===
 
 # 入力: (H, W, C), 出力: (パッチ数, patch_h * patch_w, C)
