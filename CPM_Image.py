@@ -366,9 +366,9 @@ if moviepy_available:
                 # 最終的な幅と高さでライターを初期化
                 h, w = img.shape[:2]
                 self.writer = FFMPEG_VideoWriter(
-                    filename=self.params["filename"],
+                    #filename=self.params["filename"],
                     size=(w, h),
-                    fps=self.params["fps"],
+                    #fps=self.params["fps"],
                     **self.params,
                 )
 

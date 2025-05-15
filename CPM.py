@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-from CPM_Map import * 
+from CPM_Map import *
 
 # === デバイス設定 ===
 # CUDA (GPU) が利用可能ならGPUを、そうでなければCPUを使用
@@ -16,6 +16,9 @@ else:
 
 # 細胞IDのカウンター（グローバル変数、シンプルなPython intとして管理）
 cell_newer_id_counter = 1
+
+center_index = 4  # 中央のインデックス
+neighbors = [1, 3, 5, 7]
 
 
 def map_init(height=256, width=256):
@@ -34,8 +37,6 @@ def map_init(height=256, width=256):
     # add_cell関数で細胞を追加（map_tensorが直接変更され、次のIDが返る）
     map_tensor, _ = add_cell(map_tensor, center_x_slice, center_y_slice, value=100)
 
-    # IDカウンターをリセット（初期細胞追加後に次のIDを2にする）
-    cell_newer_id_counter = 2
     return map_tensor
 
 
@@ -58,8 +59,9 @@ def add_cell(map_tensor, x_slice, y_slice, value=100.0):
     # 変更されたマップテンソルと、次に使用するIDを返す
     return map_tensor, cell_newer_id_counter
 
+
 # === CPM 計算関数 ===
-center_index = 4  # 中央のインデックス
+
 
 def calc_area_bincount(map_tensor):
     """torch.bincount を使って各細胞IDの面積（ピクセル数）を計算する。"""
@@ -122,7 +124,7 @@ def calc_total_perimeter_bincount(
 
 
 def calc_dH_area(
-    current_areas_patch, l_A, A_0, source_is_not_empty, target_is_not_empty
+    source_areas, target_area, l_A, A_0, source_is_not_empty, target_is_not_empty
 ):
     # 1. 面積エネルギー変化 ΔH_A
     # H_A = λ_A * (A - A_0)^2
@@ -130,8 +132,6 @@ def calc_dH_area(
     # ΔH_A = λ_A * [ (A_s+1 - A_0)^2 - (A_s - A_0)^2 ] + λ_A * [ (A_t-1 - A_0)^2 - (A_t - A_0)^2 ]
     # ΔH_A = λ_A * [ 2*A_s + 1 - 2*A_0 ] + λ_A * [ -2*A_t + 1 + 2*A_0 ]
     # ΔH_A = λ_A * [ 2*(A_s - A_t) + 2 ]
-    source_areas = current_areas_patch[:, :-1]  # (N, 4)
-    target_area = current_areas_patch[:, -1:]  # (N, 1)
     delta_H_area = (
         l_A * (2.0 * source_areas + 1 - 2 * A_0) * source_is_not_empty
         + (-2.0 * target_area + 1 + 2 * A_0) * target_is_not_empty
@@ -140,8 +140,10 @@ def calc_dH_area(
 
 
 def calc_dH_perimeter(
-    current_perimeters_patch,  # (N, 5) 各ソース候補セルの現在の総周囲長
-    ids_patch,  # (N, 5) ソース候補のID群。実際にはターゲットピクセルの4近傍のID
+    source_perimeters,  # (N, 4)
+    target_perimeter,  # (N, 1)
+    source_ids,  # (N, P) ソース候補のID群。
+    target_id,  # (N, 1) ターゲットセルのID
     l_L: float,  # 周囲長エネルギーの係数
     L_0: float,  # 基準周囲長
     source_is_not_empty: torch.Tensor,  # (N, 4) ソース候補が空でないかのマスク (boolean)
@@ -180,11 +182,6 @@ def calc_dH_perimeter(
     #                            s_k と同じIDを持つものがいくつあるかをカウントする。
     # 結果の形状は (N, 4)。各要素 (i, k) は、i番目のパッチにおいて、
     # k番目のソース候補 (source_ids[i, k]) が、そのパッチの近傍 (source_ids[i, :]) にいくつ存在するか。
-    source_ids = ids_patch[:, :-1]  # (N, 4)
-    target_id = ids_patch[:, -1:]  # (N, 1)
-
-    source_perimeters = current_perimeters_patch[:, :-1]  # (N, 4)
-    target_perimeter = current_perimeters_patch[:, -1:]  # (N, 1)
 
     num_s_in_target_neighbors = torch.zeros_like(
         source_ids, dtype=torch.float, device=device
@@ -243,9 +240,6 @@ def calc_dH_perimeter(
     return delta_H_perimeter
 
 
-import torch
-
-
 def has_nan_or_inf(tensor: torch.Tensor) -> bool:
     """
     テンソル内にNaNまたは無限大が含まれているかどうかを判定します。
@@ -264,13 +258,14 @@ def has_nan_or_inf(tensor: torch.Tensor) -> bool:
     )  # ~ はビット反転 (True/False反転)
 
 
-def calc_cpm_probabilities(map_tensor, ids_patch, l_A, A_0, l_L, L_0, T):
+def calc_cpm_probabilities(map_tensor, source_ids, target_id, l_A, A_0, l_L, L_0, T):
     """
     CPMの状態遷移確率（ロジット）を計算する。
 
     Args:
         map_tensor: マップ全体のテンソル (H, W, 3)
-        ids_patch: 抽出されたパッチのID (N, 4) (移動方向の数)
+        source_ids: 抽出されたパッチのID (N, P) 複数個のソースを同時に計算可能
+        target_id: 抽出されたパッチのターゲットID (N, 1)
         l_A: 面積エネルギーの係数
         A_0: 基準面積
         l_L: 周囲長エネルギーの係数
@@ -300,29 +295,27 @@ def calc_cpm_probabilities(map_tensor, ids_patch, l_A, A_0, l_L, L_0, T):
     )  # (ID数,)
 
     # パッチ内の各ピクセルのIDに対応する細胞の現在の面積/周囲長を取得
-    safe_ids_patch = torch.clamp(ids_patch.long(), 0, cell_newer_id_counter - 1)
-    current_areas_patch = area_counts[safe_ids_patch]  # 細胞の総面積 (N, 5)
-    current_perimeters_patch = perimeter_counts[safe_ids_patch]  # 細胞の総周囲長 (N, 5)
+    source_areas = area_counts[source_ids.long()]  # 細胞の総面積 (N, P)
+    target_area = area_counts[target_id.long()]  # ターゲットセルの総面積 (N, 1)
 
-    # パッチ中心（ターゲットセル）と、パッチ内の全セル（ソース候補）を特定
-    target_id = ids_patch[:, -1:]  # ターゲットセルのID (N,)
-    target_perimeter = current_perimeters_patch[:, -1:]  #  (N, )
-    target_is_not_empty = target_id != 0  # ターゲットセルが空（ID=0）かどうか (N,)
+    source_perimeters = perimeter_counts[source_ids.long()]  # ソース候補の総周囲長 (N, P)
+    target_perimeter = perimeter_counts[target_id.long()]  # ターゲットセルの総周囲長 (N, 1)
 
-    source_ids = ids_patch[:, :-1]  # ソース候補のID (N, 4)
-    source_perimeters = current_perimeters_patch[:, :-1]  # (N, 4)
-    source_is_not_empty = source_ids != 0  # ソース候補が空（ID=0）かどうか (N, 4)
+    source_is_not_empty = source_ids != 0  # ソース候補が空（ID=0）かどうか (N, P)
+    target_is_not_empty = target_id != 0  # ターゲットセルが空（ID=0）かどうか (N, 1)
 
     # --- ΔHの各項を計算 ---
     # 1. 面積エネルギー変化 ΔH_A
     delta_H_area = calc_dH_area(
-        current_areas_patch, l_A, A_0, source_is_not_empty, target_is_not_empty
+        source_areas, target_area, l_A, A_0, source_is_not_empty, target_is_not_empty
     )
 
     # 2. 周囲長エネルギー変化 ΔH_L
     delta_H_perimeter = calc_dH_perimeter(
-        current_perimeters_patch,
-        ids_patch,
+        source_perimeters,
+        target_perimeter,
+        source_ids,
+        target_id,
         l_L,
         L_0,
         source_is_not_empty,
@@ -332,28 +325,20 @@ def calc_cpm_probabilities(map_tensor, ids_patch, l_A, A_0, l_L, L_0, T):
     # delta_H_perimeter = torch.zeros_like(delta_H_area, dtype=torch.float32)
 
     # 3. 接着エネルギー変化 ΔH_adhesion
-    # ΔH_adhesion = Sum_{y neighbor of x} [ J(s, σ_y) - J(t, σ_y) ]
-    # 中心ピクセルxの隣接ピクセルyについて、境界エネルギーの変化を合計する。
-    # J(a, b) = 1 (if a != b and a,b > 0), 0 otherwise.
-    # delta_H_adhesion_patch = torch.zeros_like(ids_patch, dtype=torch.float32) # (N, 9)
 
     # --- 総エネルギー変化 ΔH ---
-    delta_H = delta_H_area + delta_H_perimeter  # (N, 4)
+    delta_H = delta_H_area + delta_H_perimeter  # (N, P)
 
-    # --- ボルツマン確率のロジット（対数確率）を計算 ---
-    # Logit = -ΔH / T
-    # 無限大のΔHは -無限大のロジットになる
-    logits = torch.exp(-delta_H / T)  # (N, 4)
+    # --- ボルツマン確率のロジット（対数確率）を計算 -- Logit = -ΔH / T
+    logits = torch.exp(-delta_H / T)  # (N, P)
 
     # 遷移確率が0になるように）
     logits = torch.where(
         source_ids != target_id, logits, torch.tensor(0.0, device=device)
     )
 
-    return logits  # 各パッチ中心に対する遷移ロジット(N, 4)を返す
+    return logits  # 各パッチ中心に対する遷移ロジット(N, P-1)を返す
 
-
-neighbors = [1, 3, 5, 7, 4]
 
 def cpm_checkerboard_step_single(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
     """CPMの1ステップをチェッカーボードパターンの一部に対して実行する。"""
@@ -382,7 +367,13 @@ def cpm_checkerboard_step_single(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_o
         print(
             f"警告: ids_patch (インデックス操作前) に NaN/Inf があります! (offset: {x_offset}, {y_offset})"
         )
+
     ids_patch = ids_patch[:, neighbors]
+    ids_center = ids_patch[:, center_index]  # (N, 1)
+    dir_rand = torch.randint(0, 4, (num_patches,), device=device)  # (N,)
+    ids_patch = torch.gather(
+        ids_patch[:, -1:], dim=1, index=dir_rand.unsqueeze(1).expand(-1, 5)
+    )  # (N, 5)
 
     # パッチの形状: (パッチ数, 5, C) = (N, 5, 3)
 
@@ -449,7 +440,6 @@ def cpm_checkerboard_step(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
     map_patched = extract_patches_manual_padding_with_offset(
         map_input, 3, 3, x_offset, y_offset
     )
-    num_patches = map_patched.shape[0]
     # print(map_patched.shape)
     ids_patch = map_patched[:, :, 0]
 
@@ -467,20 +457,18 @@ def cpm_checkerboard_step(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
         print(
             f"警告: ids_patch (インデックス操作前) に NaN/Inf があります! (offset: {x_offset}, {y_offset})"
         )
-    ids_patch = ids_patch[:, neighbors]
 
-    # パッチの形状: (パッチ数, 5, C) = (N, 5, 3)
+    source_ids = ids_patch[:, neighbors]  # (N, 4)
+    target_id = ids_patch[:, center_index].unsqueeze(1)  # (N, 1)
 
     # 2. 各パッチ中心に対する状態遷移のロジットを計算
-    # 入力: マップ全体と抽出されたパッチ
-    # 出力: (N, 4) - 隣接状態(0-8)をサンプリングするためのロジット
-    logits = calc_cpm_probabilities(map_input, ids_patch, l_A, A_0, l_L, L_0, T)
+    logits = calc_cpm_probabilities(
+        map_input, source_ids, target_id, l_A, A_0, l_L, L_0, T
+    )
     logits = torch.clip(logits, 0, 1)
     # print(logits)
-    # 3. 各パッチ中心について、次に採用する状態（隣接ピクセルのインデックス）をサンプリング
-    # torch.multinomialは確率または対数確率を入力とする。
-    # 全てのロジットが-infの場合、multinomialはエラーを起こすため、これをハンドルする。
 
+    # 3. 各パッチ中心について、次に採用する状態（隣接ピクセルのインデックス）をサンプリング
     rand = torch.rand_like(logits)  # 確率を生成 (N, 4)
 
     selects = torch.relu(torch.sign(logits - rand))  # 0か1に(N, 4)
@@ -492,7 +480,7 @@ def cpm_checkerboard_step(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
 
     # 遷移しない確率を追加
     prob = torch.concat((prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1)
-    # print(prob)
+    #print(prob)
     # サンプリング (N, 1)
     sampled_indices = torch.multinomial(prob, num_samples=1)
 
@@ -503,7 +491,8 @@ def cpm_checkerboard_step(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_offset):
     # source_id_all : (N, 5)
     # sampled_indices : (N, 1)
 
-    new_center_ids = torch.gather(ids_patch, dim=1, index=sampled_indices.long())
+    ids_concat = torch.concat([source_ids, target_id], dim=1)  # (N, 5)
+    new_center_ids = torch.gather(ids_concat, dim=1, index=sampled_indices.long())
 
     # 5. パッチテンソルを更新：中心ピクセルのIDを新しいIDで、前のIDを古いIDで更新
     # map_patched_updated = map_patched.clone()  # 元のパッチテンソルをコピーして変更
@@ -541,6 +530,8 @@ def print_cpm_bins(map_tensor):
     print("周囲長")
     p = calc_perimeter_patch(map_tensor)
     print(calc_total_perimeter_bincount(map_tensor, p))
+
+
 # === 拡散 関数 ===
 
 
@@ -610,4 +601,3 @@ def diffusion_step(map_tensor: torch.Tensor, dt=0.1):
     # ID (チャンネル0) と Previous ID (チャンネル2) はこのステップでは変更しない
 
     return map_out
-
