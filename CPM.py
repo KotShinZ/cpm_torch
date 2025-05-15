@@ -19,6 +19,7 @@ cell_newer_id_counter = 1
 
 center_index = 4  # 中央のインデックス
 neighbors = [1, 3, 5, 7]
+neighbors_len = len(neighbors)  # 4近傍の数
 
 
 def map_init(height=256, width=256):
@@ -344,12 +345,10 @@ def cpm_checkerboard_step_single(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_o
     """CPMの1ステップをチェッカーボードパターンの一部に対して実行する。"""
     H, W, C = map_input.shape
 
-    # 1. 現在のチェッカーボードオフセットに対応するパッチを抽出
-    # 出力: (パッチ数, 9, C)
+    # 1. 現在のチェッカーボードオフセットに対応するパッチを抽出 (N, 9, C)
     map_patched = extract_patches_manual_padding_with_offset(
         map_input, 3, 3, x_offset, y_offset
     )
-    num_patches = map_patched.shape[0]
     # print(map_patched.shape)
     ids_patch = map_patched[:, :, 0]
 
@@ -368,57 +367,24 @@ def cpm_checkerboard_step_single(map_input, l_A, A_0, l_L, L_0, T, x_offset, y_o
             f"警告: ids_patch (インデックス操作前) に NaN/Inf があります! (offset: {x_offset}, {y_offset})"
         )
 
-    ids_patch = ids_patch[:, neighbors]
-    ids_center = ids_patch[:, center_index]  # (N, 1)
-    dir_rand = torch.randint(0, 4, (num_patches,), device=device)  # (N,)
-    ids_patch = torch.gather(
-        ids_patch[:, -1:], dim=1, index=dir_rand.unsqueeze(1).expand(-1, 5)
-    )  # (N, 5)
-
-    # パッチの形状: (パッチ数, 5, C) = (N, 5, 3)
+    source_ids = ids_patch[:, neighbors]  # (N, 4)
+    target_id = ids_patch[:, center_index].unsqueeze(1)  # (N, 1)
+    
+    source_rand_ids = torch.randint(0, neighbors_len, (source_ids.shape[0], 1), device=device) # (N, 1)
+    source_ids_one = torch.gather(source_ids, dim=1, index=source_rand_ids.long())  # (N, 1)
+    
 
     # 2. 各パッチ中心に対する状態遷移のロジットを計算
-    # 入力: マップ全体と抽出されたパッチ
-    # 出力: (N, 4) - 隣接状態(0-8)をサンプリングするためのロジット
-    logits = calc_cpm_probabilities(map_input, ids_patch, l_A, A_0, l_L, L_0, T)
-    logits = torch.clip(logits, 0, 1)
+    logits = calc_cpm_probabilities(
+        map_input, source_ids_one, target_id, l_A, A_0, l_L, L_0, T
+    )
+    # logits = torch.clip(logits, 0, 1)
     # print(logits)
+
     # 3. 各パッチ中心について、次に採用する状態（隣接ピクセルのインデックス）をサンプリング
-    # torch.multinomialは確率または対数確率を入力とする。
-    # 全てのロジットが-infの場合、multinomialはエラーを起こすため、これをハンドルする。
+    rand = torch.rand_like(logits)  # 確率を生成 (N, 1)
 
-    rand = torch.rand_like(logits)  # 確率を生成 (N, 4)
-
-    selects = torch.relu(torch.sign(logits - rand))  # 0か1に(N, 4)
-
-    # 各パッチの確率 (N, 4) - 確率の合計は1になる
-    # prob = selects / (torch.sum(selects, dim=1, keepdim=True) + 1e-8)  # (N, 4)
-
-    prob = selects / 4
-
-    # 遷移しない確率を追加
-    prob = torch.concat((prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1)
-    # print(prob)
-    # サンプリング (N, 1)
-    sampled_indices = torch.multinomial(prob, num_samples=1)
-
-    # 4. サンプリングされたインデックスに基づいて、採用するソース細胞のIDを取得
-    # ソース候補のIDは map_patched[:, :, 0] (形状: パッチ数, 9)
-    # torch.gatherを使って、sampled_indicesに基づいてIDを選択
-    # gather(入力テンソル, 次元, インデックステンソル)
-    # source_id_all : (N, 5)
-    # sampled_indices : (N, 1)
-
-    new_center_ids = torch.gather(ids_patch, dim=1, index=sampled_indices.long())
-
-    # 5. パッチテンソルを更新：中心ピクセルのIDを新しいIDで、前のIDを古いIDで更新
-    # map_patched_updated = map_patched.clone()  # 元のパッチテンソルをコピーして変更
-
-    # patch_indices = torch.arange(num_patches, device=device)
-
-    # まず、チャンネル2（前のID）を現在の中心ID（古いID）で更新
-    # old_center_ids = map_patched[:, center_index, 0]  # (N,)
-    # map_patched_updated[patch_indices, center_index, 2] = old_center_ids
+    new_center_ids = torch.where(logits > rand, source_ids_one, target_id)  # (N, 1)
 
     # 次に、チャンネル0（現在のID）をサンプリングされた新しいIDで更新
     map_patched[:, center_index, 0] = new_center_ids.squeeze(1)
