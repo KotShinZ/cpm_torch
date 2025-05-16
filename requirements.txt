@@ -1,5 +1,5 @@
 moviepy==2.0.0.dev2
-opencv-python
-matplotlib
-tqdm
+opencv-python>=4.11.0.86
+matplotlib>=3.9.4
+tqdm>=4.67.1
 ipykernel

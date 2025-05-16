@@ -1,16 +1,16 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-from CPM_Map import *
+from cpm_torch.CPM_Map import *
 
 # === デバイス設定 ===
 # CUDA (GPU) が利用可能ならGPUを、そうでなければCPUを使用
 if torch.cuda.is_available():
     device = torch.device("cuda")
-    print(f"GPUを利用します: {torch.cuda.get_device_name(0)}")
+    #print(f"GPUを利用します: {torch.cuda.get_device_name(0)}")
 else:
     device = torch.device("cpu")
-    print("CPUを利用します")
+    #print("CPUを利用します")
 
 # === 初期化関連 ===
 
@@ -95,7 +95,7 @@ def calc_perimeter_patch(map_tensor: torch.Tensor) -> torch.Tensor:
 
     center_ids = id_patches[:, :, center_index, 0]  # 各パッチ中心のID (H, W)
     # 各パッチの上下左右の隣接ピクセルのID (H, W, 4)
-    neighbor_ids_data = id_patches[:, :, [1, 3, 5, 7], 0]
+    neighbor_ids_data = id_patches[:, :, neighbors, 0]
 
     # 中心IDと各隣接IDを比較 (H, W, 4) -> 境界ならTrue
     is_boundary = neighbor_ids_data != center_ids.unsqueeze(-1)

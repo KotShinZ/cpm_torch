@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "cpm_torch"
+version = "0.1.2"
+description = "Celluar Potts Model for pytorch"
+authors = ["KotShinZ <s18574s18574@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+torch = {version = "^2.6.0", source = "torch_cu124"}
+moviepy = "2.0.0.dev2"
+opencv-python = ">=4.11.0.86"
+tqdm = ">=4.67.1"
+
+
+[[tool.poetry.source]]
+name = "torch_cu124"
+url = "https://download.pytorch.org/whl/cu124"
+priority = "explicit"
+
+
+[tool.poetry.group.dev.dependencies]
+matplotlib = "3.9.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

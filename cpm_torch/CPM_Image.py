@@ -7,7 +7,6 @@ import base64  # Base64エンコーディング
 import zipfile  # ZIPファイル操作
 import json  # JSONデータ操作
 import requests  # HTTPリクエスト
-import matplotlib.pylab as plt  # グラフ描画ライブラリ Matplotlib
 import glob  # ファイルパスのパターンマッチング
 import torch
 import numpy as np  # 数値計算ライブラリ NumPy
@@ -180,8 +179,6 @@ def imshow(a, target_width=256, target_height=256, fmt="jpeg"):
     if not ipython_available:
         print("imshow関数はIPython.displayが必要です。")
         # 代替案: matplotlibで表示（コメントアウト）
-        # plt.imshow(torch_to_numpy(a) if isinstance(a, torch.Tensor) else a)
-        # plt.show()
         return
 
     try:
