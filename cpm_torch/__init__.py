@@ -1,4 +1,4 @@
-from .CPM import *
+from .CPM_func import *
 from .CPM_Map import *
 from .CPM_Image import *
 
