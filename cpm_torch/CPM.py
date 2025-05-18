@@ -40,6 +40,15 @@ class CPM:
             device=device,
         )
         self.device = device
+        
+    def reset(self):
+        """マップテンソルを初期化する。"""
+        self.map_tensor = torch.zeros(
+            (self.config.height, self.config.width, 1),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.cell_count = 0
 
     def add_cell(self, *pos):
         x = slice(pos[0], pos[0] + 1)
@@ -253,7 +262,7 @@ class CPM:
 
         return delta_H_perimeter
 
-    def calc_cpm_probabilities(self, source_ids, target_id):
+    def calc_cpm_probabilities(self, source_ids, target_id, dH_NN=None):
         """
         CPMの状態遷移確率（ロジット）を計算する。
 
@@ -306,6 +315,11 @@ class CPM:
 
         # --- 総エネルギー変化 ΔH ---
         delta_H = delta_H_area + delta_H_perimeter  # (N, P)
+        
+        if dH_NN is not None:
+            # dH_NNは、ニューラルネットワークからの出力で、形状は(N, P)。
+            # delta_Hに加算することで、エネルギー変化を調整する。
+            delta_H += dH_NN
 
         # --- ボルツマン確率のロジット（対数確率）を計算 -- Logit = -ΔH / T
         logits = torch.exp(-delta_H / self.config.T)  # (N, P)
@@ -359,7 +373,7 @@ class CPM:
         self.map_tensor = map_output
 
         return logits
-    
+
     def cpm_checkerboard_step_single2(self, x_offset, y_offset):
         """CPMの1ステップをチェッカーボードパターンの一部に対して実行する。"""
         H, W, C = self.map_tensor.shape
@@ -374,7 +388,7 @@ class CPM:
 
         source_ids = ids_patch[:, self.neighbors]  # (N, 4)
         target_id = ids_patch[:, self.center_index].unsqueeze(1)  # (N, 1)
-        
+
         source_rand_ids = torch.randint(
             0, self.neighbors_len, (source_ids.shape[0], 1), device=self.device
         )  # (N, 1)
@@ -395,15 +409,15 @@ class CPM:
         # 各パッチの確率 (N, 4) - 確率の合計は1になる
         # prob = selects / (torch.sum(selects, dim=1, keepdim=True) + 1e-8)  # (N, 4)
 
-        #prob = selects / 4
+        # prob = selects / 4
 
         # 遷移しない確率を追加
-        #prob = torch.concat((prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1)
+        # prob = torch.concat((prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1)
         # print(prob)
         # サンプリング (N, 1)
-        #sampled_indices = torch.multinomial(prob, num_samples=1)
+        # sampled_indices = torch.multinomial(prob, num_samples=1)
         new_center_ids = torch.where(logits > rand, source_ids_one, target_id)
-        #print(new_center_ids)
+        # print(new_center_ids)
 
         # 4. サンプリングされたインデックスに基づいて、採用するソース細胞のIDを取得
         # ソース候補のIDは map_patched[:, :, 0] (形状: パッチ数, 9)
@@ -412,8 +426,8 @@ class CPM:
         # source_id_all : (N, 5)
         # sampled_indices : (N, 1)
 
-        #ids_concat = torch.concat([source_ids, target_id], dim=1)  # (N, 5)
-        #new_center_ids = torch.gather(ids_concat, dim=1, index=sampled_indices.long())
+        # ids_concat = torch.concat([source_ids, target_id], dim=1)  # (N, 5)
+        # new_center_ids = torch.gather(ids_concat, dim=1, index=sampled_indices.long())
 
         # 5. パッチテンソルを更新：中心ピクセルのIDを新しいIDで、前のIDを古いIDで更新
         # map_patched_updated = map_patched.clone()  # 元のパッチテンソルをコピーして変更
@@ -436,23 +450,30 @@ class CPM:
 
         return logits
 
-    def cpm_checkerboard_step(self, x_offset, y_offset):
-        """CPMの1ステップをチェッカーボードパターンの一部に対して実行する。"""
-        H, W, C = self.map_tensor.shape
-
+    def get_map_patched(self, x_offset, y_offset):
+        """指定されたオフセットに基づいて、マップテンソルをパッチ化する。"""
         # 1. 現在のチェッカーボードオフセットに対応するパッチを抽出
         # 出力: (パッチ数, 9, C)
         map_patched = extract_patches_manual_padding_with_offset(
             self.map_tensor, 3, 3, x_offset, y_offset
         )
-        # print(map_patched.shape)
+        return map_patched
+
+    def cpm_checkerboard_step(self, x_offset, y_offset, dH_NN = None):
+        """CPMの1ステップをチェッカーボードパターンの一部に対して実行する。"""
+        H, W, C = self.map_tensor.shape
+        
+        map_patched = self.get_map_patched(x_offset, y_offset)
+
+        # 1. 現在のチェッカーボードオフセットに対応するパッチを抽出
+        # 出力: (パッチ数, 9, C)
         ids_patch = map_patched[:, :, 0]
 
         source_ids = ids_patch[:, self.neighbors]  # (N, 4)
         target_id = ids_patch[:, self.center_index].unsqueeze(1)  # (N, 1)
 
         # 2. 各パッチ中心に対する状態遷移のロジットを計算
-        logits = self.calc_cpm_probabilities(source_ids, target_id)
+        logits = self.calc_cpm_probabilities(source_ids, target_id, dH_NN=dH_NN)
         logits = torch.clip(logits, 0, 1)
         # print(logits)
 
@@ -506,8 +527,8 @@ class CPM:
     def cpm_mcs_step(self):
         for x_offset in range(3):  # x方向オフセット (0 or 1)
             for y_offset in range(3):  # y方向オフセット (0 or 1)
-                #self.cpm_checkerboard_step(x_offset, y_offset)
-                self.cpm_checkerboard_step_single2(x_offset, y_offset)
+                self.cpm_checkerboard_step(x_offset, y_offset)
+                # self.cpm_checkerboard_step_single2(x_offset, y_offset)
 
     def check_map_tensor(self):
         if torch.isnan(self.map_tensor).any() or torch.isinf(self.map_tensor).any():
