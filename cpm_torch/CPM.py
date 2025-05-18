@@ -374,9 +374,16 @@ class CPM:
 
         source_ids = ids_patch[:, self.neighbors]  # (N, 4)
         target_id = ids_patch[:, self.center_index].unsqueeze(1)  # (N, 1)
+        
+        source_rand_ids = torch.randint(
+            0, self.neighbors_len, (source_ids.shape[0], 1), device=self.device
+        )  # (N, 1)
+        source_ids_one = torch.gather(
+            source_ids, dim=1, index=source_rand_ids.long()
+        )  # (N, 1)
 
         # 2. 各パッチ中心に対する状態遷移のロジットを計算
-        logits = self.calc_cpm_probabilities(source_ids, target_id)
+        logits = self.calc_cpm_probabilities(source_ids_one, target_id)
         logits = torch.clip(logits, 0, 1)
         # print(logits)
 
@@ -388,13 +395,15 @@ class CPM:
         # 各パッチの確率 (N, 4) - 確率の合計は1になる
         # prob = selects / (torch.sum(selects, dim=1, keepdim=True) + 1e-8)  # (N, 4)
 
-        prob = selects / 4
+        #prob = selects / 4
 
         # 遷移しない確率を追加
-        prob = torch.concat((prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1)
+        #prob = torch.concat((prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1)
         # print(prob)
         # サンプリング (N, 1)
-        sampled_indices = torch.multinomial(prob, num_samples=1)
+        #sampled_indices = torch.multinomial(prob, num_samples=1)
+        new_center_ids = torch.where(logits > rand, source_ids_one, target_id)
+        #print(new_center_ids)
 
         # 4. サンプリングされたインデックスに基づいて、採用するソース細胞のIDを取得
         # ソース候補のIDは map_patched[:, :, 0] (形状: パッチ数, 9)
@@ -403,8 +412,8 @@ class CPM:
         # source_id_all : (N, 5)
         # sampled_indices : (N, 1)
 
-        ids_concat = torch.concat([source_ids, target_id], dim=1)  # (N, 5)
-        new_center_ids = torch.gather(ids_concat, dim=1, index=sampled_indices.long())
+        #ids_concat = torch.concat([source_ids, target_id], dim=1)  # (N, 5)
+        #new_center_ids = torch.gather(ids_concat, dim=1, index=sampled_indices.long())
 
         # 5. パッチテンソルを更新：中心ピクセルのIDを新しいIDで、前のIDを古いIDで更新
         # map_patched_updated = map_patched.clone()  # 元のパッチテンソルをコピーして変更
@@ -498,7 +507,7 @@ class CPM:
         for x_offset in range(3):  # x方向オフセット (0 or 1)
             for y_offset in range(3):  # y方向オフセット (0 or 1)
                 #self.cpm_checkerboard_step(x_offset, y_offset)
-                self.cpm_checkerboard_step_single(x_offset, y_offset)
+                self.cpm_checkerboard_step_single2(x_offset, y_offset)
 
     def check_map_tensor(self):
         if torch.isnan(self.map_tensor).any() or torch.isinf(self.map_tensor).any():
