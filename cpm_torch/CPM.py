@@ -260,6 +260,9 @@ class CPM:
         Args:
             source_ids: 抽出されたパッチのID (N, P) 複数個のソースを同時に計算可能
             target_id: 抽出されたパッチのターゲットID (N, 1)
+
+        Returns:
+            logits: 各パッチ中心に対する状態遷移のロジット (N, P)
         """
         area_counts = self.calc_area_bincount()  # (ID数,)
         perimeter_counts = self.calc_total_perimeter_bincount()  # (ID数,)
@@ -336,7 +339,7 @@ class CPM:
         )  # (N, 1)
 
         # 2. 各パッチ中心に対する状態遷移のロジットを計算
-        logits = self.calc_cpm_probabilities(self, source_ids_one, target_id)
+        logits = self.calc_cpm_probabilities(source_ids_one, target_id)
         # logits = torch.clip(logits, 0, 1)
         # print(logits)
 
@@ -344,6 +347,73 @@ class CPM:
         rand = torch.rand_like(logits)  # 確率を生成 (N, 1)
 
         new_center_ids = torch.where(logits > rand, source_ids_one, target_id)  # (N, 1)
+
+        # 次に、チャンネル0（現在のID）をサンプリングされた新しいIDで更新
+        map_patched[:, self.center_index, 0] = new_center_ids.squeeze(1)
+
+        # 6. 更新されたパッチテンソルからマップ全体を再構成
+        map_output = reconstruct_image_from_patches(
+            map_patched, self.map_tensor.shape, 3, 3, x_offset, y_offset
+        )
+
+        self.map_tensor = map_output
+
+        return logits
+    
+    def cpm_checkerboard_step_single2(self, x_offset, y_offset):
+        """CPMの1ステップをチェッカーボードパターンの一部に対して実行する。"""
+        H, W, C = self.map_tensor.shape
+
+        # 1. 現在のチェッカーボードオフセットに対応するパッチを抽出
+        # 出力: (パッチ数, 9, C)
+        map_patched = extract_patches_manual_padding_with_offset(
+            self.map_tensor, 3, 3, x_offset, y_offset
+        )
+        # print(map_patched.shape)
+        ids_patch = map_patched[:, :, 0]
+
+        source_ids = ids_patch[:, self.neighbors]  # (N, 4)
+        target_id = ids_patch[:, self.center_index].unsqueeze(1)  # (N, 1)
+
+        # 2. 各パッチ中心に対する状態遷移のロジットを計算
+        logits = self.calc_cpm_probabilities(source_ids, target_id)
+        logits = torch.clip(logits, 0, 1)
+        # print(logits)
+
+        # 3. 各パッチ中心について、次に採用する状態（隣接ピクセルのインデックス）をサンプリング
+        rand = torch.rand_like(logits)  # 確率を生成 (N, 4)
+
+        selects = torch.relu(torch.sign(logits - rand))  # 0か1に(N, 4)
+
+        # 各パッチの確率 (N, 4) - 確率の合計は1になる
+        # prob = selects / (torch.sum(selects, dim=1, keepdim=True) + 1e-8)  # (N, 4)
+
+        prob = selects / 4
+
+        # 遷移しない確率を追加
+        prob = torch.concat((prob, 1 - torch.sum(prob, dim=1, keepdim=True)), dim=1)
+        # print(prob)
+        # サンプリング (N, 1)
+        sampled_indices = torch.multinomial(prob, num_samples=1)
+
+        # 4. サンプリングされたインデックスに基づいて、採用するソース細胞のIDを取得
+        # ソース候補のIDは map_patched[:, :, 0] (形状: パッチ数, 9)
+        # torch.gatherを使って、sampled_indicesに基づいてIDを選択
+        # gather(入力テンソル, 次元, インデックステンソル)
+        # source_id_all : (N, 5)
+        # sampled_indices : (N, 1)
+
+        ids_concat = torch.concat([source_ids, target_id], dim=1)  # (N, 5)
+        new_center_ids = torch.gather(ids_concat, dim=1, index=sampled_indices.long())
+
+        # 5. パッチテンソルを更新：中心ピクセルのIDを新しいIDで、前のIDを古いIDで更新
+        # map_patched_updated = map_patched.clone()  # 元のパッチテンソルをコピーして変更
+
+        # patch_indices = torch.arange(num_patches, device=device)
+
+        # まず、チャンネル2（前のID）を現在の中心ID（古いID）で更新
+        # old_center_ids = map_patched[:, center_index, 0]  # (N,)
+        # map_patched_updated[patch_indices, center_index, 2] = old_center_ids
 
         # 次に、チャンネル0（現在のID）をサンプリングされた新しいIDで更新
         map_patched[:, self.center_index, 0] = new_center_ids.squeeze(1)
@@ -427,7 +497,8 @@ class CPM:
     def cpm_mcs_step(self):
         for x_offset in range(3):  # x方向オフセット (0 or 1)
             for y_offset in range(3):  # y方向オフセット (0 or 1)
-                self.cpm_checkerboard_step(x_offset, y_offset)
+                #self.cpm_checkerboard_step(x_offset, y_offset)
+                self.cpm_checkerboard_step_single(x_offset, y_offset)
 
     def check_map_tensor(self):
         if torch.isnan(self.map_tensor).any() or torch.isinf(self.map_tensor).any():
@@ -436,9 +507,9 @@ class CPM:
                 f"NaNs in map_tensor ch0: {torch.isnan(self.map_tensor[:,:,0]).sum()}, ch1: {torch.isnan(self.map_tensor[:,:,1]).sum()}, ch2: {torch.isnan(self.map_tensor[:,:,2]).sum()}"
             )
 
-    def print_cpm_bins(self, map_tensor):
-        area_counts = self.calc_area_bincount(map_tensor)
-        perimeter_counts = self.calc_total_perimeter_bincount(map_tensor)
+    def print_cpm_bins(self):
+        area_counts = self.calc_area_bincount()
+        perimeter_counts = self.calc_total_perimeter_bincount()
 
         print("面積カウント:", area_counts)
         print("周囲長カウント:", perimeter_counts)
