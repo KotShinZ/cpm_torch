@@ -4,6 +4,69 @@ import torch.nn.functional as F
 
 # === CPM パッチ抽出 / 再構成 (PyTorchのunfold/foldを使用) ===
 
+
+def extract_patches_manual_padding_with_offset_batch(
+    images, patch_h, patch_w, slide_h, slide_w
+):
+    """
+    指定されたオフセットに基づいて手動でパディングした後、F.unfoldを用いてパッチを抽出する（バッチ対応版）。
+    これはTensorFlow版の挙動（特定のオフセットから始まる非オーバーラップパッチ）を再現する。
+    入力: (N, H, W, C), 出力: (N, パッチ数, patch_h * patch_w, C)
+    """
+    assert images.ndim == 4, "入力画像は4次元 (N, H, W, C) である必要があります。"
+    batch_size, img_h, img_w, channels = images.shape
+
+    # オフセットが非負整数であることを確認
+    slide_h, slide_w = int(slide_h), int(slide_w)
+    assert slide_h >= 0 and slide_w >= 0, "オフセットは非負である必要があります。"
+
+    # --- 1. 必要なパディング量を計算 ---
+    # オフセット分のパディングを含めた実効的な高さ/幅
+    effective_h = img_h + slide_h
+    effective_w = img_w + slide_w
+
+    # パディング後の目標高さ/幅 (パッチサイズで割り切れるように切り上げ)
+    target_h = ((effective_h + patch_h - 1) // patch_h) * patch_h
+    target_w = ((effective_w + patch_w - 1) // patch_w) * patch_w
+
+    # F.padに必要なパディング量を計算 (左、右、上、下)
+    pad_top = slide_h
+    pad_left = slide_w
+    pad_bottom = target_h - effective_h
+    pad_right = target_w - effective_w
+
+    # PyTorchのF.padは (左, 右, 上, 下) の順で指定。入力は(N, C, H, W)である必要があるため転置。
+    images_nchw = images.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
+    # 定数値0でパディング実行
+    padded_images_nchw = F.pad(
+        images_nchw, (pad_left, pad_right, pad_top, pad_bottom), mode="constant", value=0
+    )
+
+    # パディング後の形状を取得
+    _n, _c, padded_h, padded_w = padded_images_nchw.shape
+
+    # --- 2. F.unfold を用いてパッチを抽出 ---
+    # F.unfold は入力 (N, C, H, W) を期待。
+    # カーネルサイズ = (patch_h, patch_w), ストライド = (patch_h, patch_w) で非オーバーラップ抽出。
+    patches_unfolded = F.unfold(
+        padded_images_nchw,
+        kernel_size=(patch_h, patch_w),
+        stride=(patch_h, patch_w),
+    )
+    # 出力形状: (N, C * patch_h * patch_w, パッチ数L)
+    # L = num_patches_h * num_patches_w
+
+    # --- 3. TensorFlow版の出力フォーマットに整形 ---
+    # (N, C * ph * pw, L) -> (N, C, ph * pw, L) に変形
+    patches_reshaped = patches_unfolded.view(batch_size, channels, patch_h * patch_w, -1)
+
+    # -> (N, C, ph * pw, L) -> (N, L, ph * pw, C) に転置 (permute)
+    final_patches = patches_reshaped.permute(0, 3, 2, 1)
+    # 最終形状: (バッチサイズN, 総パッチ数L, patch_h * patch_w, チャンネル数C)
+
+    return final_patches
+
+
 # 入力: (H, W, C), 出力: (パッチ数, patch_h * patch_w, C)
 # 3*3のパッチに分割
 def extract_patches_manual_padding_with_offset(

@@ -16,18 +16,18 @@ class CPMEnv(gym.Env):
         self.device = torch.device(device_str)
         self.cpm_model = CPM(cpm_config, self.device)
 
-        action_bound = 10.0  # Bound for dH adjustments (can be tuned)
+        action_bound = 30.0  # Bound for dH adjustments (can be tuned)
+        bathch_size = int((self.cpm_model.map_tensor.shape[0] // 3 + 1)* (self.cpm_model.map_tensor.shape[0] // 3 + 1))
         self.action_space = spaces.Box(
             low=-action_bound,
             high=action_bound,
-            shape=(4,),
+            shape=(bathch_size * 4,),
             dtype=np.float32,
         )
-        bathch_size = int((self.cpm_model.map_tensor.shape[0] // 3 + 1)* (self.cpm_model.map_tensor.shape[0] // 3 + 1))
         self.observation_space = spaces.Box(
             low=0,
-            high=1000,
-            shape=(bathch_size ,9, self.cpm_model.map_tensor.shape[2]),
+            high=np.inf,
+            shape=self.cpm_model.map_tensor.shape,
             dtype=np.float32,
         )
         self.current_target_pixel_coords: Optional[Tuple[int, int]] = None
@@ -35,12 +35,14 @@ class CPMEnv(gym.Env):
         
         self.iter_in_mcs = 0 # MCSのチェッカーボードのイテレーション数
 
-    def get_obs(self) -> np.ndarray:
-        # (batch_size, 9, 3)のテンソルを返す
-        return self.cpm_model.get_map_patched(self.iter_in_mcs % 3,  (self.iter_in_mcs // 3) % 3)
+    def get_obs(self):
+        # (256, 256, C)のテンソルを返す
+        obs = self.cpm_model.map_tensor.clone()
+        obs[0, 0, 0] = obs[0, 0, 0] * 10**2 + self.iter_in_mcs % 9
+        return obs
 
     def get_reward(self) -> float:
-        # 報酬は定数
+        # (1)
         target = torch.zeros_like(self.cpm_model.map_tensor)
         half = target.shape[0] // 2
         target[:half, :] = 1.0
@@ -57,9 +59,9 @@ class CPMEnv(gym.Env):
         return self.get_obs(), {}
 
     def step(self, action: np.ndarray):
-        # actionは(batch_size, 4)のテンソル
+        # action:(7396, 4)
         # 予測したニューラルハミルトニアンを使って、1step進める
-        self.cpm_model.cpm_checkerboard_step(self.iter_in_mcs % 3, self.iter_in_mcs // 3, dH_NN = action)
+        self.cpm_model.cpm_checkerboard_step(self.iter_in_mcs % 3, (self.iter_in_mcs // 3) % 3, dH_NN = action.reshape(-1, 4))
         self.iter_in_mcs += 1
         
         observation = self.get_obs()
@@ -68,8 +70,11 @@ class CPMEnv(gym.Env):
         truncated = False  # Not using truncation based on time limit separately here
         
         self.current_step += 1
+        
+        if terminated:
+            self.render()
 
-        return observation, reward, terminated, truncated, {}
+        return observation, reward, terminated, truncated, {"iter_in_mcs": self.iter_in_mcs}
 
     def render(self, mode="ansi"):
         imshow_map(self.cpm_model.map_tensor)
