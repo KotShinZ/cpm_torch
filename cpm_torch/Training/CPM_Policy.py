@@ -57,11 +57,6 @@ class CPMPolicy(ActorCriticPolicy):
                 out_channels=1,
                 features=[64, 128, 256],
             ),  # (B, 1, 256, 256)
-            U_Net.UNet(
-                in_channels=self.observation_space.shape[2],
-                out_channels=1,
-                features=[64, 128, 256],
-            ),  # (B, 1, 256, 256)
             nn.Flatten(),  # (B, 1*256*256)
             nn.Linear(256 * 256, 32),  # (B, 128)
             nn.SiLU(),
