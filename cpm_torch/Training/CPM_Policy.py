@@ -75,45 +75,127 @@ class CPMPolicy(ActorCriticPolicy):
         )
 
     def vectorized_row_unique_rank_by_appearance(self, x: torch.Tensor) -> torch.Tensor:
-        """ベクトル化された手法で各行の出現順ランクを計算する関数"""
+        """
+        ベクトル化された手法で各行の出現順ランクを計算する関数。
+        ランクは0から始まる整数です。同じ値は同じランクになります。
+        例: x = torch.tensor([[10, 20, 10, 0, 20]])
+            ranks = self.vectorized_row_unique_rank_by_appearance(x)
+            # ranks は [[0, 1, 0, 2, 1]] となる (値10がランク0, 値20がランク1, 値0がランク2)
+        """
         B, N = x.shape
         device = x.device
 
-        if B == 0:  # B=0 の場合のガード処理
+        if B == 0:
             return torch.empty((0, N), dtype=torch.int64, device=device)
-        if N == 0:  # N=0 の場合のガード処理 (B > 0)
-            return torch.empty_like(x, dtype=torch.int64)
+        if N == 0:
+            return torch.empty((B, 0), dtype=torch.int64, device=device)
 
-        # ステージ1: 各要素の値がその行で最初に出現する列インデックスを計算 (mci)
         cols_broadcast = torch.arange(N, device=device).view(1, 1, N).expand(B, N, N)
         eq_mask = x.unsqueeze(2) == x.unsqueeze(1)
 
-        sentinel = N
+        sentinel = N 
         masked_cols = torch.where(eq_mask, cols_broadcast, sentinel)
         mci = masked_cols.min(dim=2).values
 
-        # ステージ2: mci テンソルの各行に対してデンスランクを計算
         A = mci
         S_values, S_indices = A.sort(dim=1)
 
-        R_sorted = torch.zeros_like(A)
-        R_sorted[:, 1:] = (S_values[:, 1:] != S_values[:, :-1]).cumsum(dim=1)
+        R_sorted = torch.zeros_like(A, dtype=torch.int64)
+        if N > 1:
+            R_sorted[:, 1:] = (S_values[:, 1:] != S_values[:, :-1]).cumsum(dim=1)
 
-        R_final = torch.empty_like(A)
+        R_final = torch.empty_like(A, dtype=torch.int64)
         R_final.scatter_(dim=1, index=S_indices, src=R_sorted)
-
         return R_final
 
-    def patch_unique(self, map_patched: torch.Tensor):
-        map_patched = map_patched.reshape(
-            -1, map_patched.shape[2], map_patched.shape[3]
-        )  # (B*7396, 9, C)
+    def patch_unique(self, map_patched: torch.Tensor) -> torch.Tensor:
+        """
+        パッチごとに新しいルールでユニークなIDを割り当てる。
+        ルールは前回の説明通り（同じ値には同じID、中央値優先など）。
+        """
+        original_shape = map_patched.shape
+        original_ndim = map_patched.ndim
+        
+        n_elements_in_patch = 0 
 
-        _in = map_patched[:, :, 0]  # (B*7396, 9)
+        if original_ndim == 4: 
+            num_items = original_shape[0] * original_shape[1]
+            n_elements_in_patch = original_shape[2]
+            num_channels = original_shape[3]
+            reshaped_map_patched = map_patched.reshape(num_items, n_elements_in_patch, num_channels)
+        elif original_ndim == 3: 
+            num_items = original_shape[0]
+            n_elements_in_patch = original_shape[1]
+            num_channels = original_shape[2]
+            reshaped_map_patched = map_patched
+        elif original_ndim == 2 and map_patched.is_contiguous(): 
+            num_items = original_shape[0]
+            n_elements_in_patch = original_shape[1]
+            num_channels = 1 
+            reshaped_map_patched = map_patched.unsqueeze(-1)
+        else:
+            if torch.numel(map_patched) == 0 : 
+                return map_patched 
+            raise ValueError(
+                f"Input tensor map_patched has an unsupported shape: {original_shape}. "
+                "Expected 2D (ITEMS, N), 3D (ITEMS, N, C), or 4D (B, P, N, C)."
+            )
 
-        uni = self.vectorized_row_unique_rank_by_appearance(_in) + 1  # (B*7396, 9)
-        map_patched[:, :, 0] = _in.where(_in == 0, uni)
-        return map_patched  # (B*7396, 9, C)
+        _in_data = reshaped_map_patched[:, :, 0].clone() 
+        
+        B, N = _in_data.shape 
+        device = _in_data.device
+        
+        if B == 0 or N == 0:
+            if original_ndim == 2 and num_channels == 1: 
+                return reshaped_map_patched.squeeze(-1)
+            return reshaped_map_patched 
+
+        R_all_values_rank = self.vectorized_row_unique_rank_by_appearance(_in_data)
+
+        final_ids = torch.zeros_like(_in_data, dtype=torch.int64, device=device)
+        center_idx = N // 2
+        
+        center_value_per_row = _in_data[:, center_idx].unsqueeze(1) 
+        is_center_value_nonzero = (center_value_per_row != 0)      
+        next_base_id_for_others = torch.where(is_center_value_nonzero,
+                                           torch.tensor(2, dtype=torch.int64, device=device),
+                                           torch.tensor(1, dtype=torch.int64, device=device)) 
+
+        rank_of_center_value = R_all_values_rank[:, center_idx].unsqueeze(1)
+        
+        placeholder_rank_for_missing_zero = R_all_values_rank.max().item() + 1 
+        
+        R_masked_for_zero_val_rank = torch.where(_in_data == 0, R_all_values_rank, placeholder_rank_for_missing_zero)
+        rank_of_zero_value, _ = R_masked_for_zero_val_rank.min(dim=1, keepdim=True) 
+        zero_value_exists = (rank_of_zero_value < placeholder_rank_for_missing_zero) 
+
+        shift_amount = torch.zeros_like(R_all_values_rank, dtype=torch.int64) 
+        
+        shift_due_to_zero = (R_all_values_rank > rank_of_zero_value) & zero_value_exists
+        shift_amount += shift_due_to_zero.long()
+        
+        shift_due_to_center_value = (R_all_values_rank > rank_of_center_value) & is_center_value_nonzero
+        shift_amount += shift_due_to_center_value.long()
+
+        adjusted_rank_for_others = R_all_values_rank - shift_amount
+        ids_candidate_for_others = adjusted_rank_for_others + next_base_id_for_others
+
+        final_ids = ids_candidate_for_others
+        
+        mask_value_is_center_value = (_in_data == center_value_per_row) 
+        final_ids = torch.where(mask_value_is_center_value & is_center_value_nonzero,
+                                torch.tensor(1, dtype=torch.int64, device=device),
+                                final_ids)
+        
+        final_ids[_in_data == 0] = 0 
+        
+        reshaped_map_patched[:, :, 0] = final_ids.to(reshaped_map_patched.dtype)
+        
+        if original_ndim == 2 and num_channels == 1 and map_patched.is_contiguous():
+             return reshaped_map_patched.squeeze(-1) 
+        
+        return reshaped_map_patched
 
     def preprocess_obs(self, obs):
         iter_in_mcs = int(obs[0, 0, 0, 0] - int(obs[0, 0, 0, 0] / 10**2) * 10**2)
