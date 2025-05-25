@@ -83,8 +83,6 @@ class Actor_Net(nn.Module):
 
         return R_final
 
-        
-    
     def patch_unique(self, map_patched: torch.Tensor):
         """
         パッチごとにユニークなIDを割り当てる。
