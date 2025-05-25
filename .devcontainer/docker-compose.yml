@@ -15,7 +15,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              device_ids: ["3"]
               capabilities: [gpu]
     #mem_limit: 64g
     # auto_remove: true  # 3.8では非サポートのため削除

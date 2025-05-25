@@ -10,10 +10,10 @@ from cpm_torch.CPM_Image import *
 class CPMEnv(gym.Env):
     metadata = {"render_modes": ["ansi"], "render_fps": 4}
 
-    def __init__(self, cpm_config: CPM_config, device_str: str = "cpu"):
+    def __init__(self, cpm_config: CPM_config, device: str = "cuda"):
         super().__init__()
         self.config = cpm_config
-        self.device = torch.device(device_str)
+        self.device = torch.device(device)
         self.cpm_model = CPM(cpm_config, self.device)
 
         action_bound = 30.0  # Bound for dH adjustments (can be tuned)
@@ -21,17 +21,18 @@ class CPMEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-action_bound,
             high=action_bound,
-            shape=(bathch_size * 4,),
+            shape=(bathch_size * 4,), # (7396, 4)
             dtype=np.float32,
         )
         self.observation_space = spaces.Box(
             low=0,
             high=np.inf,
-            shape=self.cpm_model.map_tensor.shape,
+            shape=self.cpm_model.map_tensor.shape, # (256, 256, C)
             dtype=np.float32,
         )
         self.current_target_pixel_coords: Optional[Tuple[int, int]] = None
         self.current_step = 0
+        self.current_episode = 0
         
         self.iter_in_mcs = 0 # MCSのチェッカーボードのイテレーション数
 
@@ -43,18 +44,38 @@ class CPMEnv(gym.Env):
 
     def get_reward(self) -> float:
         # (1)
-        target = torch.zeros_like(self.cpm_model.map_tensor)
-        half = target.shape[0] // 2
-        target[:half, :] = 1.0
-        reward = torch.sum(self.cpm_model.map_tensor * target)
+        ids = self.cpm_model.map_tensor[:, :, 0]
+        rows, cols = ids.shape
+
+        # # (rows,)
+        row_weights = torch.arange(rows, 0, -1, dtype=torch.float32, device=ids.device) / rows 
+        
+        # (rows, 1)
+        weights_per_row = row_weights.unsqueeze(1).expand(-1, cols)
+
+        # 2. マップの存在を表すテンソル (0 or 1) を取得
+        #    元のコードと同様に、map_tensor の値を0か1にクリッピング
+        one_tensor = torch.clip(ids, 0, 1)
+
+        # 3. 重み付けされたマップを作成
+        #    要素ごとの積を計算することで、マップ上の各要素にその行の重みを適用
+        weighted_map = one_tensor * weights_per_row
+        
+        # imshow_map_area(weighted_map.unsqueeze(2), target_channel=0, _max=1) # デバッグ用に表示する場合は適宜実装してください
+
+        # 4. 重み付けされたマップの合計を報酬とする
+        reward = torch.sum(weighted_map)
+
+        # 5. 元のコードのスケール調整を維持
         return float(reward) / 1000
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.cpm_model.reset()
-        for x in range(10):
-            for y in range(10):
-                self.cpm_model.add_cell(x + 122, y + 122)
+        center = self.cpm_model.map_tensor.shape[0] // 2
+        for x in range(0, 1):
+            for y in range(0, 1):
+                self.cpm_model.add_cell(x * 15 + center, y * 15 + center)
         self.current_step = 0
         return self.get_obs(), {}
 
@@ -66,13 +87,15 @@ class CPMEnv(gym.Env):
         
         observation = self.get_obs()
         reward = self.get_reward()
-        terminated = self.current_step >= 1000
+        terminated = self.current_step >= 200
         truncated = False  # Not using truncation based on time limit separately here
         
         self.current_step += 1
         
         if terminated:
-            self.render()
+            self.current_episode += 1
+            if self.current_episode % 30 == 0:
+                self.render()
 
         return observation, reward, terminated, truncated, {"iter_in_mcs": self.iter_in_mcs}
 

@@ -464,7 +464,7 @@ class CPM:
         H, W, C = self.map_tensor.shape
         
         map_patched = self.get_map_patched(x_offset, y_offset)
-
+        
         # 1. 現在のチェッカーボードオフセットに対応するパッチを抽出
         # 出力: (パッチ数, 9, C)
         ids_patch = map_patched[:, :, 0]

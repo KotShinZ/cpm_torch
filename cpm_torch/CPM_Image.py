@@ -635,9 +635,9 @@ def imshow_map(map_tensor):
     imshow(im_tensor)
 
 
-def imshow_map_area(map_tensor, _max=100.0, _min=0.0):
+def imshow_map_area(map_tensor, _max=100.0, _min=0.0, target_channel=1):
     """マップテンソルのチャンネル1（面積/密度）を指定範囲で正規化し、グレースケール画像として表示する。"""
-    area = map_tensor[:, :, 1]  # 面積/密度チャンネルを取得
+    area = map_tensor[:, :, target_channel]  # 面積/密度チャンネルを取得
     # 値を指定された最小値(_min)と最大値(_max)の範囲にクリップ（制限）する
     area = torch.clamp(area, min=_min, max=_max)
     # [0, 255]の範囲に正規化
