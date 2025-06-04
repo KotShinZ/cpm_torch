@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 # === CPM パッチ抽出 / 再構成 (PyTorchのunfold/foldを使用) ===
 
-
+# 入力: (N, H, W, C), 出力: (N, パッチ数, patch_h * patch_w, C)
 def extract_patches_manual_padding_with_offset_batch(
     images, patch_h, patch_w, slide_h, slide_w
 ):
@@ -142,8 +142,8 @@ def reconstruct_image_from_patches(
     """
     num_total_patches, flat_patch_size, channels = patches.shape
     target_h, target_w, target_c = target_shape
-    assert channels == target_c, "チャンネル数が一致しません。"
-    assert flat_patch_size == patch_h * patch_w, "パッチサイズが一致しません。"
+    assert channels == target_c, "チャンネル数が一致しません。for target_shape={target_shape}, channels={channels}"
+    assert flat_patch_size == patch_h * patch_w, "パッチサイズが一致しません。flat_patch_size={flat_patch_size}, patch_h={patch_h}, patch_w={patch_w}"
 
     # --- 1. パディング後の次元を計算 (抽出時と同じロジック) ---
     slide_h, slide_w = int(slide_h), int(slide_w)
@@ -191,6 +191,64 @@ def reconstruct_image_from_patches(
     assert (
         reconstructed_image.shape == target_shape
     ), f"再構成後の形状 {reconstructed_image.shape} != 目標形状 {target_shape}"
+
+    return reconstructed_image
+
+def reconstruct_image_from_patches_batch(
+    patches, target_shape, patch_h, patch_w, slide_h, slide_w
+):
+    """
+    バッチ対応版。
+    入力: (B, パッチ数, patch_h * patch_w, C)
+    出力: (B, target_h, target_w, C)
+    """
+    B, num_total_patches, flat_patch_size, channels = patches.shape
+    target_h, target_w, target_c = target_shape
+    assert channels == target_c, "チャンネル数が一致しません。"
+    assert flat_patch_size == patch_h * patch_w, "パッチサイズが一致しません。"
+
+    # --- パディング後の次元を計算 ---
+    slide_h, slide_w = int(slide_h), int(slide_w)
+    effective_h = target_h + slide_h
+    effective_w = target_w + slide_w
+    padded_h = ((effective_h + patch_h - 1) // patch_h) * patch_h
+    padded_w = ((effective_w + patch_w - 1) // patch_w) * patch_w
+    num_patches_h = padded_h // patch_h
+    num_patches_w = padded_w // patch_w
+    assert (
+        num_total_patches == num_patches_h * num_patches_w
+    ), "パッチ数が一致しません。"
+
+    # --- F.fold 用に整形 ---
+    # permute: (B, L, ph*pw, C) → (B, C, ph*pw, L)
+    patches_chw = patches.permute(0, 3, 2, 1)
+    # reshape: (B, C, ph*pw, L) → (B, C*ph*pw, L)
+    patches_for_fold = patches_chw.reshape(
+        B, channels * patch_h * patch_w, num_total_patches
+    )
+
+    # --- F.fold で再構成 ---
+    reconstructed_padded_chw = F.fold(
+        patches_for_fold,
+        output_size=(padded_h, padded_w),
+        kernel_size=(patch_h, patch_w),
+        stride=(patch_h, patch_w),
+    )  # 出力: (B, C, padded_h, padded_w)
+
+    # permute: (B, C, H, W) → (B, H, W, C)
+    reconstructed_padded_hwc = reconstructed_padded_chw.permute(0, 2, 3, 1)
+
+    # --- パディングを除去 ---
+    pad_top = slide_h
+    pad_left = slide_w
+    reconstructed_image = reconstructed_padded_hwc[
+        :, pad_top : pad_top + target_h, pad_left : pad_left + target_w, :
+    ]  # (B, target_h, target_w, C)
+
+    # チェック
+    assert (
+        reconstructed_image.shape == (B, target_h, target_w, target_c)
+    ), f"再構成後の形状 {reconstructed_image.shape} != {(B, target_h, target_w, target_c)}"
 
     return reconstructed_image
 

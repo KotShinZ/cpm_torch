@@ -207,7 +207,10 @@ class CPMPolicy(ActorCriticPolicy):
         )
 
         # 相対的なIDに変換
+        half = map_patched.shape[0]
+        print(map_patched[0:3])
         map_patched = self.patch_unique(map_patched) # (B*7396, 9, C)
+        print(map_patched[0:3])
 
         map_patched = map_patched.reshape(map_patched.shape[0], -1)  # (B*7396, 9*C)
         

@@ -627,9 +627,28 @@ def map_tensor_to_rgb(map_tensor):
     return im_tensor  # RGB画像テンソルを返す
 
 # === 可視化関数 ===
-def imshow_map(map_tensor):
+def imshow_map(map_tensor, func = None):
     """マップテンソルの細胞IDに基づいて色付けし、画像として表示する。"""
     im_tensor = map_tensor_to_rgb(map_tensor)  # ID画像を生成
+    
+    if func is not None:
+        # funcが指定されている場合、画像に関数を適用
+        im_tensor = func(im_tensor, map_tensor)
+
+    # imshow関数で表示（テンソル -> NumPy -> 表示処理はimshow内部で行われる）
+    imshow(im_tensor)
+    
+# === 可視化関数 ===
+def imshow_map_target(map_tensor, func = None):
+    """マップテンソルの細胞IDに基づいて色付けし、画像として表示する。"""
+    im_tensor = map_tensor_to_rgb(map_tensor)  # ID画像を生成
+    
+    target = map_tensor[:, :, 1]  # ターゲットチャンネルを取得
+    
+    im_tensor = im_tensor.where(
+        target.unsqueeze(-1) <= 0,  # ターゲットチャンネルが0より大きい場合に色を適用
+        torch.tensor([0, 0, 0], dtype=torch.uint8, device=im_tensor.device)  # 黒色で上書き
+    )
 
     # imshow関数で表示（テンソル -> NumPy -> 表示処理はimshow内部で行われる）
     imshow(im_tensor)
@@ -650,9 +669,9 @@ def imshow_map_area(map_tensor, _max=100.0, _min=0.0, target_channel=1):
     imshow(im_tensor_area)
 
 
-def imshow_map_area_autoRange(map_tensor):
+def imshow_map_area_autoRange(map_tensor, target_channel=1):
     """マップテンソルのチャンネル1（面積/密度）を自動範囲で正規化し、グレースケール画像として表示する。"""
-    area = map_tensor[:, :]  # 面積/密度チャンネルを取得
+    area = map_tensor[:, :, target_channel]   # 面積/密度チャンネルを取得
     _max = torch.max(area)  # 最大値を取得
     _min = torch.min(area)  # 最小値を取得
     # [0, 255]の範囲に正規化

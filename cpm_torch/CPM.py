@@ -20,7 +20,11 @@ class CPM_config:
         self.A_0 = kwargs.pop("A_0", 1.0)  # 基準面積
         self.L_0 = kwargs.pop("L_0", 4.0)  # 基準周囲長
         self.T = kwargs.pop("T", 1.0)  # 温度
-
+        
+        self.diffusion_channels = kwargs.pop("diffusion_channels", [2])  # 拡散チャンネル数
+        self.other_channels = len(self.diffusion_channels)  # 他のチャンネル数
+        self.diffusion_D = kwargs.pop("diffusion_D", [0.1])  # 拡散係数
+        self.diffusion_percent = kwargs.pop("diffusion_percent", [1.0]) # 細胞壁での拡散を抑制する割合
 
 class CPM:
     def __init__(self, config: CPM_config, device="cuda"):
@@ -34,17 +38,20 @@ class CPM:
 
         # マップテンソルを作成: (高さ, 幅, チャンネル数)
         # チャンネル 0: 細胞ID
+        # チャンネル 1: ターゲット値
+        # チャンネル 2から: 他のチャンネル（拡散など）
         self.map_tensor = torch.zeros(
-            (self.config.height, self.config.width, 1),
+            (self.config.height, self.config.width, 2 + self.config.other_channels),
             dtype=torch.float32,
             device=device,
         )
+        print(self.map_tensor.shape)
         self.device = device
         
     def reset(self):
         """マップテンソルを初期化する。"""
         self.map_tensor = torch.zeros(
-            (self.config.height, self.config.width, 1),
+            (self.config.height, self.config.width, 2 + self.config.other_channels),
             dtype=torch.float32,
             device=self.device,
         )

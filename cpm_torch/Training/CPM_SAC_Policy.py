@@ -39,8 +39,8 @@ class Actor_Net(nn.Module):
         self.fc1 = nn.Linear(observation_space.shape[2] * 9, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 128)
-        self.fc_mean = nn.Linear(128, 4)
-        self.fc_log_std = nn.Linear(128, 4)
+        self.fc_mean = nn.Linear(128, action_space.shape[1])
+        self.fc_log_std = nn.Linear(128, action_space.shape[1])
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         B = x.shape[0]  # バッチサイズ
@@ -189,7 +189,7 @@ class Critic_Net(nn.Module):
             features=[64, 128, 256],
         )  # (B, 1, 256, 256)
         self.obs1 = nn.Linear(observation_space.shape[0] * observation_space.shape[1], 256)  # (B, 256)
-        self.ac1 = nn.Linear(action_space.shape[0], 256)  # (B, 256)
+        self.ac1 = nn.Linear(action_space.shape[0] * action_space.shape[1], 256)  # (B, 256)
         self.fc1 = nn.Linear(512, 256)
         self.fc2 = nn.Linear(256, 128)
         self.fc3 = nn.Linear(128, 1)
@@ -198,7 +198,10 @@ class Critic_Net(nn.Module):
         x = self.u_net1(x.permute(0, 3, 1, 2))  # (B, 1, 256, 256)
         x = x.flatten(start_dim=1)  # (B, 1*256*256)
         x = th.relu(self.obs1(x))  # (B, 256)
+        
+        actions = actions.reshape(x.shape[0], -1)
         actions = th.relu(self.ac1(actions.reshape(x.shape[0], -1)))  # (B, 256)
+        
         x = th.relu(self.fc1(th.cat([x, actions], dim=1)))  # (B, 512)
         x = th.relu(self.fc2(x))  # (B, 256)
         x = self.fc3(x)  # (B, 1)
