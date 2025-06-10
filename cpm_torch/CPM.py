@@ -180,8 +180,8 @@ class CPM:
             area = cls.calc_area_bincount(ids_i, cell_count)  # (cell_count,)
             perimeter = cls.calc_total_perimeter_bincount(ids_i, cell_count)
 
-            print("area:", area)
-            print("perimeter:", perimeter)
+            # print("area:", area)
+            # print("perimeter:", perimeter)
 
             source_areas.append(area[source_ids[i].long()])
             target_area.append(area[target_ids[i].long()])
@@ -228,8 +228,8 @@ class CPM:
         A_0 = self.config.A_0
 
         delta_H_area = (
-            l_A * (2.0 * source_areas + 1 - 2 * A_0) * source_is_not_empty
-            + (-2.0 * target_area + 1 + 2 * A_0) * target_is_not_empty
+            l_A * ((2.0 * source_areas + 1 - 2 * A_0) * source_is_not_empty
+            + (-2.0 * target_area + 1 + 2 * A_0) * target_is_not_empty)
         )  # (N, 4)
         return delta_H_area
 
@@ -320,7 +320,7 @@ class CPM:
         term2_t = local_delta_Lt.pow(2)
         # Apply mask: energy change is 0 if target cell is empty
         delta_H_perimeter_t_for_each_source_candidate = (
-            l_L * (term1_t + term2_s) * target_is_not_empty.float()
+            l_L * (term1_t + term2_t) * target_is_not_empty.float()
         )  # (N,1)
 
         # 総エネルギー変化
@@ -417,7 +417,6 @@ class CPM:
             ids (torch.Tensor): マップのID ((B,) N, W)。
 
             dH_NN (torch.Tensor, optional): ニューラルネットワークによるエネルギー変化 ((B,) N, P)。
-            rand_dir (torch.Tensor, optional): ランダムに選ばれた方向のインデックス ((B,) N, 1)。
             source_ids_4 (torch.Tensor, optional): 周囲長計算用の4近傍のID ((B,) N, 4)。
 
         Returns:
@@ -439,7 +438,7 @@ class CPM:
             source_is_not_empty,
             target_is_not_empty,
         )
-        print("delta_H_area:", delta_H_area[0, :, 0])
+        # print("delta_H_area:", delta_H_area[0, :, 0])
 
         # 4. 周囲長エネルギー変化 ΔH_L を計算
         if source_ids.shape[1] == 1:
@@ -621,7 +620,7 @@ class CPM:
             x_offset (int): x方向のオフセット (0, 1, 2)
             y_offset (int): y方向のオフセット (0, 1, 2)
             dH_NN_func (callable, optional): エネルギー変化を計算する関数。
-                    (sources(B*N, 1, C), targets(B*N, 1, C)) -> (B*N, 1)
+                    (sources(B, N, 1, C), targets(B, N, 1, C)) -> (B*N, 1)
         Returns:
             torch.Tensor: 更新されたマップテンソル (B, H, W, C)
         """
