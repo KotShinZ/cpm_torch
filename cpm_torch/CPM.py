@@ -203,6 +203,82 @@ class CPM:
                 target_perimeter[0],  # (N, 1)
             )
 
+    @classmethod
+    def calc_area_perimeter_mask(cls, ids, source_ids, target_ids, batch_indices) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        各細胞IDの面積と周囲長を計算する。
+        この実装は、バッチ処理を効率的に行うため、ループを排除しています。
+        source_ids, target_ids, batch_indicesはバッチ間で平坦化されたテンソルを想定しています。
+
+        Parameters:
+            ids (torch.Tensor): 細胞IDのテンソル (H, W) または (B, H, W)。
+            source_ids (torch.Tensor): ソース候補のID (N', P)。
+            target_ids (torch.Tensor): ターゲットセルのID (N', 1)。
+            batch_indices (torch.Tensor): 各要素が属するバッチのインデックス (N',)。
+
+        Returns:
+            A tuple containing:
+            - source_areas (torch.Tensor): 各ソース候補セルの面積 (N', P)。
+            - target_area (torch.Tensor): ターゲットセルの面積 (N', 1)。
+            - source_perimeters (torch.Tensor): 各ソース候補セルの総周囲長 (N', P)。
+            - target_perimeter (torch.Tensor): ターゲットセルの総周囲長 (N', 1)。
+        """
+        # --- 1. 入力形状の正規化 ---
+        if ids.dim() != 3:
+            # バッチ次元がない場合、追加する
+            ids = ids.unsqueeze(0)
+
+        B, H, W = ids.shape
+        device = ids.device
+
+        # --- 2. 面積と周囲長のバッチ一括計算 ---
+        # 全バッチを通じての最大セルIDを取得
+        max_id = int(ids.max().item()) + 1
+
+        # IDにバッチごとのオフセットを追加し、全バッチを平坦化
+        # これで一回のbincountで全バッチ分をまとめて計算できる
+        offset = torch.arange(B, device=device).view(B, 1, 1) * max_id
+        ids_offset = ids + offset
+
+        # 面積計算 (Area Calculation)
+        # 全バッチのIDを1次元に平坦化してbincount
+        areas_flat = torch.bincount(ids_offset.flatten().long(), minlength=B * max_id)
+        areas = areas_flat.view(B, max_id)  # (B, max_id) の形状に戻す
+
+        # 周囲長計算 (Perimeter Calculation)
+        # 水平方向の境界 (左右のIDが異なる場所)
+        h_boundaries = ids_offset[:, :, :-1] != ids_offset[:, :, 1:]
+        # 垂直方向の境界 (上下のIDが異なる場所)
+        v_boundaries = ids_offset[:, :-1, :] != ids_offset[:, 1:, :]
+
+        # 境界を構成する両側のセルのIDを取得
+        h_left = ids_offset[:, :, :-1][h_boundaries]
+        h_right = ids_offset[:, :, 1:][h_boundaries]
+        v_up = ids_offset[:, :-1, :][v_boundaries]
+        v_down = ids_offset[:, 1:, :][v_boundaries]
+
+        # 全ての境界IDを一つのリストに結合
+        all_boundary_ids = torch.cat([h_left, h_right, v_up, v_down])
+
+        # 一括でbincountを計算し、各IDが境界に現れる回数を数える
+        perimeters_flat = torch.bincount(all_boundary_ids.long(), minlength=B * max_id)
+        perimeters = perimeters_flat.view(B, max_id)  # (B, max_id) の形状に戻す
+
+        # --- 3. IDに対応する値を取得 (Gather) ---
+        # `batch_indices`と`*_ids`を使って、対応する面積と周囲長を一度に取得
+        
+        # ソースセルの情報を取得
+        source_areas = areas[batch_indices, source_ids.long()]
+        source_perimeters = perimeters[batch_indices, source_ids.long()]
+
+        # ターゲットセルの情報を取得
+        target_ids_squeezed = target_ids.squeeze(-1).long()
+        target_area = areas[batch_indices, target_ids_squeezed].unsqueeze(-1)
+        target_perimeter = perimeters[batch_indices, target_ids_squeezed].unsqueeze(-1)
+        
+        return source_areas, target_area, source_perimeters, target_perimeter
+
+
     def calc_dH_area(
         self, source_areas, target_area, source_is_not_empty, target_is_not_empty
     ):
@@ -673,6 +749,114 @@ class CPM:
         )
 
         return map_output
+
+    
+    def cpm_checkerboard_step_single_masked_func(
+        self,
+        tensor,
+        dH_NN_func=None,
+        x_offset=-1,
+        y_offset=-1,
+    ):
+        """CPMの1ステップをチェッカーボードパターンの一部に対して実行する。
+
+        Parameters:
+            tensor (torch.Tensor): 入力テンソル (B, H, W, C)
+            x_offset (int): x方向のオフセット (0, 1, 2)
+            y_offset (int): y方向のオフセット (0, 1, 2)
+            dH_NN_func (callable, optional): エネルギー変化を計算する関数。
+                    (sources(B, N, 1, C), targets(B, N, 1, C)) -> (B, N, 1)
+        Returns:
+            torch.Tensor: 更新されたマップテンソル (B, H, W, C)
+        """
+        B, H, W, C = tensor.shape
+        if x_offset < 0 or y_offset < 0:
+            x_offset = np.random.randint(0, 3)  # ランダムなオフセット
+            y_offset = np.random.randint(0, 3)  # ランダムなオフセット
+
+        map_patched = extract_patches_manual_padding_with_offset_batch(
+            tensor, 3, 3, x_offset, y_offset
+        )  # (B, N, 9, C)
+
+        N = map_patched.shape[1]  # パッチ数
+
+        sources = map_patched[:, :, CPM.neighbors]  # (B, N, 4, C)
+        source_ids_4 = sources[..., 0]  # (B, N, 4)　周囲長の計算用
+
+        # ランダムに選択する方向　(B, N, 1, 1)
+        rand_dir = torch.randint(0, CPM.neighbors_len, (B, N, 1, 1), device=self.device)
+        rand_dir = rand_dir.expand(-1, -1, -1, C)  # (B, N, 1, C)
+
+        sources = torch.gather(sources, 2, rand_dir)  # (B, N, 1, C)
+        targets = map_patched[:, :, CPM.center_index].unsqueeze(2)  # (B, N, 1, C)
+
+        source_id = sources[..., 0]  # (B, N, 1)
+        target_id = targets[..., 0]  # (B, N, 1)
+
+        # 1. マスクとインデックスの準備
+        masks = source_id != target_id  # (B, N, 1)
+        # nonzeroで使うために次元を1つ削除
+        masks_squeezed = masks.squeeze(-1)  # (B, N)
+        
+        # マスクがTrueの要素の(バッチ, パッチ)インデックスを取得
+        # batch_indices, patch_indices はそれぞれ1次元のテンソル (形状: (N',))
+        # N' はバッチ全体でマスクがTrueの要素の総数
+        batch_indices, patch_indices = torch.nonzero(masks_squeezed, as_tuple=True)
+        
+        # もし更新対象が一つもなければ、何もせず元のテンソルを返す
+        if batch_indices.shape[0] == 0:
+            return tensor
+
+        # 2. 必要なデータだけを収集 (Gather)
+        # インデックスを使って、計算に必要な小さなテンソルを作成する
+        sources_masked = sources[batch_indices, patch_indices]  # (N', 1, C)
+        targets_masked = targets[batch_indices, patch_indices]  # (N', 1, C)
+        source_id_masked = source_id[batch_indices, patch_indices]  # (N', 1)
+        target_id_masked = target_id[batch_indices, patch_indices]  # (N', 1)
+        source_ids_4_masked = source_ids_4[batch_indices, patch_indices]  # (N', 4)
+
+        # 3. 小さなテンソルで高速に計算
+        dH_NN_masked = dH_NN_func(sources_masked, targets_masked) if dH_NN_func else None
+
+        logits_masked = self.calc_cpm_probabilities(
+            source_id_masked,
+            target_id_masked,
+            tensor[..., 0], # これは全体のIDマップなのでそのまま渡す
+            dH_NN_masked,
+            source_ids_4_masked,
+        )  # (N', 1)
+        logits_masked = torch.clip(logits_masked, 0, 1)
+
+        # 4. 計算結果を元の位置に戻す準備
+        rand_masked = torch.rand_like(logits_masked)  # (N', 1)
+        selects_masked = torch.relu(torch.sign(logits_masked - rand_masked))  # (N', 1)
+
+        new_center_ids_masked = torch.where(selects_masked > 0, source_id_masked, target_id_masked)  # (N', 1)
+
+        # 5. 元の形状のテンソルに結果を代入 (Scatter)
+        # まず、更新用のテンソルを元のIDで初期化しておく
+        updated_center_ids = target_id.clone()
+        # マスクされた位置にだけ、計算結果を書き戻す
+        updated_center_ids[batch_indices, patch_indices] = new_center_ids_masked
+        
+        # パッチの中心IDを更新
+        map_patched[:, :, CPM.center_index, 0] = updated_center_ids.squeeze(2)
+
+        # --- 修正ここまで ---
+
+        # 6. 更新されたパッチテンソルからマップ全体を再構成
+        map_output = reconstruct_image_from_patches_batch(
+            map_patched, tensor.shape, 3, 3, x_offset, y_offset
+        )
+
+
+        # 6. 更新されたパッチテンソルからマップ全体を再構成
+        map_output = reconstruct_image_from_patches_batch(
+            map_patched, tensor.shape, 3, 3, x_offset, y_offset
+        )
+
+        return map_output
+
 
     def cpm_mcs_step(self):
         for x_offset in range(3):  # x方向オフセット (0 or 1)
