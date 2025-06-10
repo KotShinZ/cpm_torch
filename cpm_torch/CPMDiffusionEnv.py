@@ -24,6 +24,10 @@ class CPMDiffusionEnv(CPMEnv):
             dtype=np.float32,
         )
         
+        self.reward_func = self.get_reward_target  # ターゲット位置に基づく報酬関数を設定
+        
+        self.image_tensor = None
+        
     def step(self, action):
         # action:(7396, 4)
         # 予測したニューラルハミルトニアンを使って、1step進める
@@ -36,20 +40,25 @@ class CPMDiffusionEnv(CPMEnv):
         action_tensor[:, 4, :] = action[:, 4:]  # (486, 9, 1)
 
         # 分子の生成
+        # self.cpm_model.map_tensor[
+        #     :, :, self.config.diffusion_channels
+        # ] += reconstruct_image_from_patches(
+        #     action_tensor,
+        #     (
+        #         self.observation_space.shape[0],
+        #         self.observation_space.shape[1],
+        #         self.config.other_channels,
+        #     ),
+        #     3,
+        #     3,
+        #     self.iter_in_mcs % 3,
+        #     (self.iter_in_mcs // 3) % 3,
+        # )
+        
+        # ターゲットの位置に分子を生成
         self.cpm_model.map_tensor[
-            :, :, self.config.diffusion_channels
-        ] += reconstruct_image_from_patches(
-            action_tensor,
-            (
-                self.observation_space.shape[0],
-                self.observation_space.shape[1],
-                self.config.other_channels,
-            ),
-            3,
-            3,
-            self.iter_in_mcs % 3,
-            (self.iter_in_mcs // 3) % 3,
-        )
+            self.target_pos[0], self.target_pos[1], self.config.diffusion_channels
+        ] = 1
 
         # 分子の数の制限
         self.cpm_model.map_tensor[:, :, self.config.diffusion_channels] = torch.clip(
@@ -83,6 +92,7 @@ class CPMDiffusionEnv(CPMEnv):
         ターゲット位置との距離に基づいて報酬を計算する。
         """
         ids = self.cpm_model.map_tensor[:, :, 0]
+        cells = (ids > 0).to(torch.float32)
         rows, cols = ids.shape
 
         target_row, target_col = self.target_pos
@@ -92,11 +102,11 @@ class CPMDiffusionEnv(CPMEnv):
             + (torch.arange(cols, device=ids.device).unsqueeze(0) - target_col) ** 2
         )
         # 距離を0~1の範囲に正規化
-        max_distance = torch.sqrt((rows - 1) ** 2 + (cols - 1) ** 2)
+        max_distance = np.sqrt((rows - 1) ** 2 + (cols - 1) ** 2)
         normalized_distance = distance_map / max_distance
-        imshow_map_area(normalized_distance.unsqueeze(2), target_channel=0, _max=1)
+        #imshow_map_area(normalized_distance.unsqueeze(2), target_channel=0, _max=1)
         # 距離が小さいほど報酬が大きくなるように計算
-        reward = 1.0 - normalized_distance[target_row, target_col]
+        reward = torch.sum((1.0 - normalized_distance[target_row, target_col]) * cells)
         # 5. 元のコードのスケール調整を維持
         reward = float(reward) / 1000.0
 

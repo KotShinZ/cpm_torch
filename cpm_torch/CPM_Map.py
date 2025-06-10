@@ -203,7 +203,7 @@ def reconstruct_image_from_patches_batch(
     出力: (B, target_h, target_w, C)
     """
     B, num_total_patches, flat_patch_size, channels = patches.shape
-    target_h, target_w, target_c = target_shape
+    _B, target_h, target_w, target_c = target_shape
     assert channels == target_c, "チャンネル数が一致しません。"
     assert flat_patch_size == patch_h * patch_w, "パッチサイズが一致しません。"
 

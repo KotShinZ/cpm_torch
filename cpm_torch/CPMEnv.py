@@ -142,16 +142,17 @@ class CPMEnv(gym.Env):
         # (256, 256, C)のテンソルを返す
         obs = self.cpm_model.map_tensor.clone()
         obs[0, 0, 0] = obs[0, 0, 0] * 10**2 + self.iter_in_mcs % 9
-        obs[:, :, 1] = self.image_tensor #　画像テンソルを状態に入れる
+        if self.image_tensor is not None:
+            obs[:, :, 1] = self.image_tensor #　画像テンソルを状態に入れる
         return obs.to("cpu")
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.cpm_model.reset()
         center = self.W // 2
-        for x in range(0, 1):
-            for y in range(0, 1):
-                self.cpm_model.add_cell(x * 5 + center, y * 5 + center)
+        for x in range(-2, 3):
+            for y in range(-2, 3):
+                self.cpm_model.add_cell(x * 15 + center, y * 15 + center)
         self.current_step = 0
         return self.get_obs(), {}
 
