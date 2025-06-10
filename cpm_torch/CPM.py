@@ -335,75 +335,72 @@ class CPM:
 
     def calc_dH_perimeter_single(
         self,
-        source_perimeters: torch.Tensor,  # (N, 1) 選んだ方向の周囲長
-        target_perimeter: torch.Tensor,  # (N, 1)
-        source_ids_4: torch.Tensor,  # (N, 4) 4近傍すべてのID
-        source_ids: torch.Tensor,  # (N, 1) 選んだソース候補のID
-        target_id: torch.Tensor,  # (N, 1)
-        source_is_not_empty: torch.Tensor,  # (N, 1)
-        target_is_not_empty: torch.Tensor,  # (N, 1)
+        source_perimeters: torch.Tensor,  # (N, 1)
+        target_perimeter: torch.Tensor,   # (N, 1)
+        source_ids_4: torch.Tensor,       # (N, 4)
+        source_ids: torch.Tensor,         # (N, 1)
+        target_id: torch.Tensor,          # (N, 1)
+        source_is_not_empty: torch.Tensor, # (N, 1)
+        target_is_not_empty: torch.Tensor, # (N, 1)
     ) -> torch.Tensor:
         """
         【単一ソース候補用】周囲長エネルギー変化 ΔH_L を計算する。
         ピクセルがターゲットセルtから特定のソースセルsに変化する状況を考える。
 
         Args:
-            source_perimeter:    注目するソースセルの現在の総周囲長 ((B,) N, 1)
-            target_perimeter:    ターゲットセルの現在の総周囲長 ((B,) N, 1)
-            source_ids_4:        ターゲットピクセルの4近傍のID群 ((B,) N, 4)
-            source_ids:           注目するソースセルのID ((B,) N, 1)
-            target_id:           ターゲットセルのID ((B,) N, 1)
-            source_is_not_empty: 注目するソースセルが空でないかのマスク ((B,) N, 1)
-            target_is_not_empty: ターゲットセルが空でないかのマスク ((B,) N, 1)
+            source_perimeters:     注目するソースセルの現在の総周囲長 ((B,) N, 1)
+            target_perimeter:      ターゲットセルの現在の総周囲長 ((B,) N, 1)
+            source_ids_4:          ターゲットピクセルの4近傍のID群 ((B,) N, 4)
+            source_ids:            注目するソースセルのID ((B,) N, 1)
+            target_id:             ターゲットセルのID ((B,) N, 1)
+            source_is_not_empty:  注目するソースセルが空でないかのマスク ((B,) N, 1)
+            target_is_not_empty:  ターゲットセルが空でないかのマスク ((B,) N, 1)
 
         Returns:
             delta_H_perimeter: 選ばれたソース候補への遷移によるエネルギー変化 ((B,) N, 1)
         """
+        
+        # ターゲットピクセルの4近傍における、ソースセルおよびターゲットセルの数を数える
+        # .float()で後の計算のために浮動小数点数に変換
+        n_s = torch.sum(source_ids_4 == source_ids, dim=-1, keepdim=True).float()
+        n_t = torch.sum(source_ids_4 == target_id, dim=-1, keepdim=True).float()
 
-        # バッチなら2, そうでなければ1
-        is_batched = source_perimeters.dim() == 3  # True: (B, N, 4), False: (N, 4)
-        gather_dim = 2 if is_batched else 1
+        # ソースセルとターゲットセルの周囲長の変化量を計算
+        # ΔL_s = 4 - 2 * n_s: 4つの辺のうち、n_s個は内部境界に変わり、(4-n_s)個は新たな外部境界となる
+        delta_L_s = 4.0 - 2.0 * n_s
+        # ΔL_t = 2 * n_t - 4: 4つの辺のうち、n_t個は新たな外部境界となり、(4-n_t)個は消滅する
+        delta_L_t = 2.0 * n_t - 4.0
 
-        chosen_source_perimeter = source_perimeters  # ((B,) N, 1)
-        chosen_source_id = source_ids  # ((B,) N, 1)
-        chosen_source_is_not_empty = source_is_not_empty  # ((B,) N, 1)
+        # エネルギー計算に必要なパラメータを取得 (selfから取得することを想定)
+        # self.get_paramsは、セルIDに基づき λ_L と L_target を返すヘルパーメソッドと仮定
+        lambda_s, target_L_s = self.config.l_L, self.config.L_0
+        lambda_t, target_L_t = self.config.l_L, self.config.L_0
+        
+        # ソースセルのエネルギー変化を計算
+        new_source_perimeter = source_perimeters + delta_L_s
+        delta_H_s = lambda_s * (
+            torch.pow(new_source_perimeter - target_L_s, 2)
+            - torch.pow(source_perimeters - target_L_s, 2)
+        )
 
-        l_L = self.config.l_L
-        L_0 = self.config.L_0
+        # ターゲットセルのエネルギー変化を計算
+        new_target_perimeter = target_perimeter + delta_L_t
+        delta_H_t = lambda_t * (
+            torch.pow(new_target_perimeter - target_L_t, 2)
+            - torch.pow(target_perimeter - target_L_t, 2)
+        )
 
-        # 2. 局所的な周囲長変化 dL_s と dL_t を計算
-        # dL_s: 選ばれたソースセルの周囲長変化
-        num_s_in_target_neighbors = torch.sum(
-            source_ids_4 == chosen_source_id,
-            dim=gather_dim,
-            keepdim=True,  # chosen_source_idは(N,1)だがブロードキャストされる
-        ).float()  # (N, 1)
-        local_delta_Ls = 4.0 - 2.0 * num_s_in_target_neighbors  # (N, 1)
-
-        # dL_t: ターゲットセルの周囲長変化
-        num_t_in_target_neighbors = torch.sum(
-            source_ids_4 == target_id, dim=gather_dim, keepdim=True
-        ).float()  # (N, 1)
-        local_delta_Lt = -4.0 + 2.0 * num_t_in_target_neighbors  # (N, 1)
-
-        # 3. エネルギー変化 ΔH_L = ΔH_L_s + ΔH_L_t を計算
-        # ソースセルのエネルギー変化 (ΔH_s)
-        term1_s = 2.0 * (chosen_source_perimeter - L_0) * local_delta_Ls
-        term2_s = local_delta_Ls.pow(2)
-        delta_H_perimeter_s = (
-            l_L * (term1_s + term2_s) * chosen_source_is_not_empty.float()
-        )  # (N, 1)
-
-        # ターゲットセルのエネルギー変化 (ΔH_t)
-        term1_t = 2.0 * (target_perimeter - L_0) * local_delta_Lt
-        term2_t = local_delta_Lt.pow(2)
-        delta_H_perimeter_t = (
-            l_L * (term1_t + term2_t) * target_is_not_empty.float()
-        )  # (N, 1)
+        # セルが存在しない（empty）場合は、エネルギー変化を0にする
+        delta_H_s = delta_H_s * source_is_not_empty.float()
+        delta_H_t = delta_H_t * target_is_not_empty.float()
 
         # 総エネルギー変化
-        delta_H_perimeter = delta_H_perimeter_s + delta_H_perimeter_t  # (N, 1)
+        delta_H_perimeter = delta_H_s + delta_H_t
 
+        # ソースセルとターゲットセルが同じIDの場合、状態変化は起こらないためエネルギー変化は0
+        is_same_id = (source_ids == target_id)
+        delta_H_perimeter[is_same_id] = 0.0
+        
         return delta_H_perimeter
 
     def calc_cpm_probabilities(
@@ -441,7 +438,7 @@ class CPM:
         # print("delta_H_area:", delta_H_area[0, :, 0])
 
         # 4. 周囲長エネルギー変化 ΔH_L を計算
-        if source_ids.shape[1] == 1:
+        if source_ids.shape[-1] == 1:
             # 【ランダム選択モード】
             delta_H_perimeter = self.calc_dH_perimeter_single(
                 source_perimeters,
@@ -620,7 +617,7 @@ class CPM:
             x_offset (int): x方向のオフセット (0, 1, 2)
             y_offset (int): y方向のオフセット (0, 1, 2)
             dH_NN_func (callable, optional): エネルギー変化を計算する関数。
-                    (sources(B, N, 1, C), targets(B, N, 1, C)) -> (B*N, 1)
+                    (sources(B, N, 1, C), targets(B, N, 1, C)) -> (B, N, 1)
         Returns:
             torch.Tensor: 更新されたマップテンソル (B, H, W, C)
         """
