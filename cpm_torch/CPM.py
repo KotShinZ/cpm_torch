@@ -268,13 +268,15 @@ class CPM:
         # `batch_indices`と`*_ids`を使って、対応する面積と周囲長を一度に取得
         
         # ソースセルの情報を取得
-        source_areas = areas[batch_indices, source_ids.long()]
-        source_perimeters = perimeters[batch_indices, source_ids.long()]
+        batch_indices_expanded = batch_indices.unsqueeze(1)
 
-        # ターゲットセルの情報を取得
-        target_ids_squeezed = target_ids.squeeze(-1).long()
-        target_area = areas[batch_indices, target_ids_squeezed].unsqueeze(-1)
-        target_perimeter = perimeters[batch_indices, target_ids_squeezed].unsqueeze(-1)
+        # `batch_indices_expanded` は (N', 1) のため、(N', P) の source_ids とブロードキャスト可能になる
+        source_areas = areas[batch_indices_expanded, source_ids.long()]
+        source_perimeters = perimeters[batch_indices_expanded, source_ids.long()]
+
+        # target_ids (N', 1) も同様に batch_indices_expanded を使ってインデックス指定する
+        target_area = areas[batch_indices_expanded, target_ids.long()]
+        target_perimeter = perimeters[batch_indices_expanded, target_ids.long()]
         
         return source_areas, target_area, source_perimeters, target_perimeter
 
@@ -480,7 +482,7 @@ class CPM:
         return delta_H_perimeter
 
     def calc_cpm_probabilities(
-        self, source_ids, target_id, ids, dH_NN=None, source_ids_4=None
+        self, source_ids, target_id, ids, dH_NN=None, source_ids_4=None, batch_indices=None
     ):
         """遷移確率を計算する。
 
@@ -491,14 +493,23 @@ class CPM:
 
             dH_NN (torch.Tensor, optional): ニューラルネットワークによるエネルギー変化 ((B,) N, P)。
             source_ids_4 (torch.Tensor, optional): 周囲長計算用の4近傍のID ((B,) N, 4)。
+            batch_indices (torch.Tensor, optional): バッチインデックス ((B,) N)。
 
         Returns:
             torch.Tensor: 各パッチ中心に対する遷移ロジット ((B,) N, P)。
         """
         # 1. 面積と周囲長を計算
-        source_areas, target_area, source_perimeters, target_perimeter = (
-            self.calc_area_perimeter(ids, source_ids, target_id)
-        )  # (N, P), (N, 1), (N, P), (N, 1)
+        if batch_indices is not None:
+            # バッチ処理用のマスクを使用して、面積と周囲長を計算
+            source_areas, target_area, source_perimeters, target_perimeter = (
+                self.calc_area_perimeter_mask(
+                    ids, source_ids, target_id, batch_indices
+                )
+            )
+        else:
+            source_areas, target_area, source_perimeters, target_perimeter = (
+                self.calc_area_perimeter(ids, source_ids, target_id)
+            )  # (N, P), (N, 1), (N, P), (N, 1)
 
         # 2. マスクを作成
         source_is_not_empty = source_ids != 0
@@ -824,6 +835,7 @@ class CPM:
             tensor[..., 0], # これは全体のIDマップなのでそのまま渡す
             dH_NN_masked,
             source_ids_4_masked,
+            batch_indices
         )  # (N', 1)
         logits_masked = torch.clip(logits_masked, 0, 1)
 
