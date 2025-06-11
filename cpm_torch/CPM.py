@@ -549,10 +549,10 @@ class CPM:
             )
 
         delta_H = delta_H_area + delta_H_perimeter
-        delta_H = delta_H.detach()  # 勾配計算を無効化
-
+        
         if dH_NN is not None:
-            delta_H = dH_NN + delta_H  # ニューラルネットワークによるエネルギー変化
+            # dH_NNが提供されている場合は、物理エネルギーをdetachしてから追加
+            delta_H = dH_NN + delta_H.detach()  # ニューラルネットワークによるエネルギー変化
 
         # print("delta_H:", delta_H[0, :, 0])
         # print("dH_area:", delta_H_area[0, :, 0])
@@ -814,8 +814,8 @@ class CPM:
         # N' はバッチ全体でマスクがTrueの要素の総数
         batch_indices, patch_indices = torch.nonzero(masks_squeezed, as_tuple=True)
         
-        # もし更新対象が一つもなければ、何もせず元のテンソルを返す
-        if batch_indices.shape[0] == 0:
+        if len(batch_indices) == 0:
+            # マスクが全てFalseの場合、何も更新しない
             return tensor
 
         # 2. 必要なデータだけを収集 (Gather)
